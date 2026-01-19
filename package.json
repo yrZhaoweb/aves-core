@@ -1,0 +1,37 @@
+{
+  "name": "aves-core",
+  "version": "0.1.0",
+  "description": "WebRTC client library for real-time communication",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "npm run build:cjs && npm run build:esm && npm run build:types",
+    "build:cjs": "tsc --module commonjs --outDir dist && cp dist/index.js dist/index.cjs || true",
+    "build:esm": "tsc --module esnext --outDir dist/esm && cp dist/esm/index.js dist/index.mjs",
+    "build:types": "tsc --declaration --emitDeclarationOnly --outDir dist",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
+  },
+  "peerDependencies": {},
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.0.0",
+    "fast-check": "^3.15.0",
+    "jest": "^29.5.0",
+    "ts-jest": "^29.1.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "webrtc",
+    "real-time",
+    "communication",
+    "peer-to-peer"
+  ],
+  "author": "",
+  "license": "MIT"
+}
