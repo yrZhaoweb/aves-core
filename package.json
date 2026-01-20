@@ -1,5 +1,5 @@
 {
-  "name": "aves-core",
+  "name": "@yrzhao/aves-core",
   "version": "0.1.0",
   "description": "WebRTC client library for real-time communication",
   "main": "dist/index.js",
