@@ -75,8 +75,8 @@ export class AvesClient extends EventEmitter {
       this.participants.set(user.id, user);
       this.emit("userJoined", user);
 
-      // Initiate WebRTC connection (we are the offerer)
-      if (this.currentUserId) {
+      // Initiate WebRTC connection only if our ID is smaller (to avoid both sides initiating)
+      if (this.currentUserId && this.currentUserId < user.id) {
         await this.initiateConnection(user.id);
       }
     });
@@ -93,6 +93,7 @@ export class AvesClient extends EventEmitter {
       "offer",
       async (fromId: string, offer: RTCSessionDescriptionInit) => {
         try {
+          console.log(`[AvesClient] Received offer from ${fromId}`);
           const pc = this.webrtcManager.createPeerConnection(fromId);
 
           // Setup ICE candidate forwarding
@@ -101,33 +102,42 @@ export class AvesClient extends EventEmitter {
               this.signalingClient.sendIceCandidate(
                 fromId,
                 this.currentUserId,
-                candidate
+                candidate,
               );
             }
           });
 
           // Setup connection state monitoring
           this.webrtcManager.onConnectionStateChange(fromId, (state) => {
+            console.log(
+              `[AvesClient] Connection state with ${fromId}: ${state}`,
+            );
             this.emit("connectionStateChange", fromId, state);
           });
 
           // Setup DataChannel state monitoring
           this.webrtcManager.onDataChannelStateChange(fromId, (state) => {
+            console.log(
+              `[AvesClient] DataChannel state with ${fromId}: ${state}`,
+            );
             this.emit("dataChannelStateChange", fromId, state);
           });
 
           // Create and send answer
           const answer = await this.webrtcManager.createAnswer(fromId, offer);
           if (this.currentUserId) {
+            console.log(
+              `[AvesClient] Sending answer to ${fromId} from ${this.currentUserId}`,
+            );
             this.signalingClient.sendAnswer(fromId, this.currentUserId, answer);
           }
         } catch (error) {
           this.emit(
             "error",
-            new Error(`Failed to handle offer from ${fromId}: ${error}`)
+            new Error(`Failed to handle offer from ${fromId}: ${error}`),
           );
         }
-      }
+      },
     );
 
     // Handle incoming answer - set remote description
@@ -135,14 +145,22 @@ export class AvesClient extends EventEmitter {
       "answer",
       async (fromId: string, answer: RTCSessionDescriptionInit) => {
         try {
+          console.log(`[AvesClient] Received answer from ${fromId}`);
           await this.webrtcManager.setRemoteAnswer(fromId, answer);
+          console.log(
+            `[AvesClient] Successfully set remote answer from ${fromId}`,
+          );
         } catch (error) {
+          console.error(
+            `[AvesClient] Failed to handle answer from ${fromId}:`,
+            error,
+          );
           this.emit(
             "error",
-            new Error(`Failed to handle answer from ${fromId}: ${error}`)
+            new Error(`Failed to handle answer from ${fromId}: ${error}`),
           );
         }
-      }
+      },
     );
 
     // Handle incoming ICE candidate
@@ -154,10 +172,10 @@ export class AvesClient extends EventEmitter {
         } catch (error) {
           this.emit(
             "error",
-            new Error(`Failed to add ICE candidate from ${fromId}: ${error}`)
+            new Error(`Failed to add ICE candidate from ${fromId}: ${error}`),
           );
         }
-      }
+      },
     );
 
     // Forward messages from WebRTC
@@ -171,6 +189,9 @@ export class AvesClient extends EventEmitter {
    */
   private async initiateConnection(peerId: string): Promise<void> {
     try {
+      console.log(
+        `[AvesClient] Initiating connection to ${peerId} from ${this.currentUserId}`,
+      );
       const pc = this.webrtcManager.createPeerConnection(peerId);
 
       // Setup ICE candidate forwarding
@@ -179,30 +200,35 @@ export class AvesClient extends EventEmitter {
           this.signalingClient.sendIceCandidate(
             peerId,
             this.currentUserId,
-            candidate
+            candidate,
           );
         }
       });
 
       // Setup connection state monitoring
       this.webrtcManager.onConnectionStateChange(peerId, (state) => {
+        console.log(`[AvesClient] Connection state with ${peerId}: ${state}`);
         this.emit("connectionStateChange", peerId, state);
       });
 
       // Setup DataChannel state monitoring
       this.webrtcManager.onDataChannelStateChange(peerId, (state) => {
+        console.log(`[AvesClient] DataChannel state with ${peerId}: ${state}`);
         this.emit("dataChannelStateChange", peerId, state);
       });
 
       // Create and send offer
       const offer = await this.webrtcManager.createOffer(peerId);
       if (this.currentUserId) {
+        console.log(
+          `[AvesClient] Sending offer to ${peerId} from ${this.currentUserId}`,
+        );
         this.signalingClient.sendOffer(peerId, this.currentUserId, offer);
       }
     } catch (error) {
       this.emit(
         "error",
-        new Error(`Failed to initiate connection with ${peerId}: ${error}`)
+        new Error(`Failed to initiate connection with ${peerId}: ${error}`),
       );
     }
   }
@@ -232,7 +258,7 @@ export class AvesClient extends EventEmitter {
   async joinRoom(
     roomId: string,
     userId: string,
-    userName: string
+    userName: string,
   ): Promise<Participant[]> {
     // Connect to signaling server if not connected
     if (!this.isConnected()) {
@@ -245,16 +271,17 @@ export class AvesClient extends EventEmitter {
     const participants = await this.signalingClient.joinRoom(
       roomId,
       userId,
-      userName
+      userName,
     );
 
     // Store participants
     this.participants.clear();
     participants.forEach((p) => this.participants.set(p.id, p));
 
-    // Initiate WebRTC connections with all existing participants
+    // Initiate WebRTC connections with existing participants
+    // Only initiate if our ID is smaller to avoid both sides initiating
     for (const participant of participants) {
-      if (participant.id !== userId) {
+      if (participant.id !== userId && userId < participant.id) {
         await this.initiateConnection(participant.id);
       }
     }

@@ -3,15 +3,22 @@
   "version": "0.1.0",
   "description": "WebRTC client library for real-time communication",
   "main": "dist/index.js",
-  "module": "dist/index.mjs",
+  "module": "dist/esm/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "files": [
     "dist"
   ],
   "scripts": {
     "build": "npm run build:cjs && npm run build:esm && npm run build:types",
     "build:cjs": "tsc --module commonjs --outDir dist && cp dist/index.js dist/index.cjs || true",
-    "build:esm": "tsc --module esnext --outDir dist/esm && cp dist/esm/index.js dist/index.mjs",
+    "build:esm": "tsc --module esnext --outDir dist/esm",
     "build:types": "tsc --declaration --emitDeclarationOnly --outDir dist",
     "test": "jest",
     "test:watch": "jest --watch",

@@ -42,9 +42,13 @@ export class WebRTCManager {
    */
   createPeerConnection(peerId: string): RTCPeerConnection {
     if (this.peerConnections.has(peerId)) {
+      console.log(
+        `[WebRTCManager] Reusing existing PeerConnection for ${peerId}`,
+      );
       return this.peerConnections.get(peerId)!;
     }
 
+    console.log(`[WebRTCManager] Creating new PeerConnection for ${peerId}`);
     const pc = new RTCPeerConnection({
       iceServers: this.iceServers,
     });
@@ -53,6 +57,9 @@ export class WebRTCManager {
 
     // Monitor connection state changes
     pc.onconnectionstatechange = () => {
+      console.log(
+        `[WebRTCManager] Connection state for ${peerId}: ${pc.connectionState}`,
+      );
       const callbacks = this.connectionStateCallbacks.get(peerId);
       if (callbacks) {
         callbacks.forEach((callback) => callback(pc.connectionState));
@@ -81,12 +88,20 @@ export class WebRTCManager {
       throw new Error(`No peer connection found for ${peerId}`);
     }
 
+    console.log(
+      `[WebRTCManager] Creating offer for ${peerId}, current state: ${pc.signalingState}`,
+    );
+
     // Create DataChannel (offer side creates it)
     const dataChannel = pc.createDataChannel("data");
     this.setupDataChannel(peerId, dataChannel);
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+
+    console.log(
+      `[WebRTCManager] Created offer for ${peerId}, new state: ${pc.signalingState}`,
+    );
 
     return offer;
   }
@@ -97,7 +112,7 @@ export class WebRTCManager {
    */
   async createAnswer(
     peerId: string,
-    offer: RTCSessionDescriptionInit
+    offer: RTCSessionDescriptionInit,
   ): Promise<RTCSessionDescriptionInit> {
     const pc = this.peerConnections.get(peerId);
     if (!pc) {
@@ -109,9 +124,19 @@ export class WebRTCManager {
       this.setupDataChannel(peerId, event.channel);
     };
 
+    console.log(
+      `[WebRTCManager] Creating answer for ${peerId}, current state: ${pc.signalingState}`,
+    );
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    console.log(
+      `[WebRTCManager] Set remote offer for ${peerId}, new state: ${pc.signalingState}`,
+    );
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    console.log(
+      `[WebRTCManager] Created answer for ${peerId}, new state: ${pc.signalingState}`,
+    );
 
     return answer;
   }
@@ -121,14 +146,26 @@ export class WebRTCManager {
    */
   async setRemoteAnswer(
     peerId: string,
-    answer: RTCSessionDescriptionInit
+    answer: RTCSessionDescriptionInit,
   ): Promise<void> {
     const pc = this.peerConnections.get(peerId);
     if (!pc) {
       throw new Error(`No peer connection found for ${peerId}`);
     }
 
+    console.log(
+      `[WebRTCManager] Setting remote answer for ${peerId}, current state: ${pc.signalingState}`,
+    );
+
+    // Check if we're in the correct state to set remote answer
+    if (pc.signalingState !== "have-local-offer") {
+      throw new Error(
+        `Cannot set remote answer for ${peerId}: wrong state ${pc.signalingState}, expected have-local-offer`,
+      );
+    }
+
     await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    console.log(`[WebRTCManager] Successfully set remote answer for ${peerId}`);
   }
 
   /**
@@ -136,7 +173,7 @@ export class WebRTCManager {
    */
   async addIceCandidate(
     peerId: string,
-    candidate: RTCIceCandidateInit
+    candidate: RTCIceCandidateInit,
   ): Promise<void> {
     const pc = this.peerConnections.get(peerId);
     if (!pc) {
@@ -156,7 +193,7 @@ export class WebRTCManager {
    */
   onIceCandidate(
     peerId: string,
-    callback: (candidate: RTCIceCandidateInit) => void
+    callback: (candidate: RTCIceCandidateInit) => void,
   ): void {
     const pc = this.peerConnections.get(peerId);
     if (!pc) {
@@ -183,7 +220,7 @@ export class WebRTCManager {
    */
   onConnectionStateChange(
     peerId: string,
-    callback: (state: RTCPeerConnectionState) => void
+    callback: (state: RTCPeerConnectionState) => void,
   ): void {
     if (!this.connectionStateCallbacks.has(peerId)) {
       this.connectionStateCallbacks.set(peerId, new Set());
@@ -196,7 +233,7 @@ export class WebRTCManager {
    */
   onDataChannelStateChange(
     peerId: string,
-    callback: (state: RTCDataChannelState) => void
+    callback: (state: RTCDataChannelState) => void,
   ): void {
     if (!this.dataChannelStateCallbacks.has(peerId)) {
       this.dataChannelStateCallbacks.set(peerId, new Set());
@@ -288,7 +325,7 @@ export class WebRTCManager {
 
     if (dataChannel.readyState !== "open") {
       throw new Error(
-        `DataChannel not ready for ${peerId}, state: ${dataChannel.readyState}`
+        `DataChannel not ready for ${peerId}, state: ${dataChannel.readyState}`,
       );
     }
 
