@@ -1,5 +1,36 @@
 import { EventEmitter } from "./EventEmitter";
-import { Participant, SignalingMessage, ReconnectConfig } from "../types/types";
+import {
+  JoinRoomResult,
+  LeaveRoomResult,
+  Participant,
+  ReconnectConfig,
+  SignalingErrorCode,
+  SignalingErrorPayload,
+  SignalingErrorStage,
+  SignalingMessage,
+} from "../types/types";
+
+class SignalingClientError extends Error {
+  code: SignalingErrorCode;
+  stage: SignalingErrorStage;
+  retryable: boolean;
+  requestId?: string;
+
+  constructor(payload: SignalingErrorPayload) {
+    super(payload.message);
+    this.name = "SignalingClientError";
+    this.code = payload.code;
+    this.stage = payload.stage;
+    this.retryable = payload.retryable;
+    this.requestId = payload.requestId;
+  }
+}
+
+interface PendingRequest<T> {
+  type: "create-room" | "join-room" | "leave-room";
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+}
 
 /**
  * SignalingClient manages WebSocket connection and signaling message exchange
@@ -12,10 +43,8 @@ export class SignalingClient extends EventEmitter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private url: string = "";
   private shouldReconnect: boolean = true;
-  private pendingRequests: Map<
-    string,
-    { resolve: (value: any) => void; reject: (error: Error) => void }
-  > = new Map();
+  private pendingRequests: Map<string, PendingRequest<any>> = new Map();
+  private requestCounter = 0;
 
   constructor(reconnectConfig: ReconnectConfig) {
     super();
@@ -71,11 +100,25 @@ export class SignalingClient extends EventEmitter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) {
+      ws.onclose = null;
+      ws.close();
     }
+    this.rejectPendingRequests(
+      new SignalingClientError({
+        message: "Signaling connection closed",
+        code: "SERVER_ERROR",
+        stage: "transport",
+        retryable: true,
+      }),
+    );
     this.emit("stateChange", "disconnected");
+  }
+
+  isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
   }
 
   /**
@@ -83,6 +126,14 @@ export class SignalingClient extends EventEmitter {
    */
   private handleDisconnect(): void {
     this.ws = null;
+    this.rejectPendingRequests(
+      new SignalingClientError({
+        message: "Signaling connection closed",
+        code: "SERVER_ERROR",
+        stage: "transport",
+        retryable: true,
+      }),
+    );
 
     if (!this.shouldReconnect) {
       return;
@@ -115,11 +166,21 @@ export class SignalingClient extends EventEmitter {
 
       switch (message.type) {
         case "room-created":
-          this.resolvePendingRequest("create-room", message.roomId);
+          this.resolvePendingRequest(message.requestId, "create-room", message.roomId);
           break;
 
         case "room-joined":
-          this.resolvePendingRequest("join-room", message.participants);
+          this.resolvePendingRequest(message.requestId, "join-room", {
+            participants: message.participants,
+            userId: message.userId,
+          });
+          break;
+
+        case "room-left":
+          this.resolvePendingRequest(message.requestId, "leave-room", {
+            roomId: message.roomId,
+            userId: message.userId,
+          });
           break;
 
         case "user-joined":
@@ -143,8 +204,7 @@ export class SignalingClient extends EventEmitter {
           break;
 
         case "error":
-          this.rejectPendingRequests(new Error(message.message));
-          this.emit("error", new Error(message.message));
+          this.handleErrorMessage(message);
           break;
       }
     } catch (error) {
@@ -168,12 +228,17 @@ export class SignalingClient extends EventEmitter {
    * @returns Promise that resolves with the room ID
    */
   createRoom(): Promise<string> {
+    const requestId = this.createRequestId("create-room");
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set("create-room", { resolve, reject });
+      this.pendingRequests.set(requestId, {
+        type: "create-room",
+        resolve,
+        reject,
+      });
       try {
-        this.send({ type: "create-room" });
+        this.send({ type: "create-room", requestId });
       } catch (error) {
-        this.pendingRequests.delete("create-room");
+        this.pendingRequests.delete(requestId);
         reject(error);
       }
     });
@@ -186,17 +251,27 @@ export class SignalingClient extends EventEmitter {
    * @param userName - User name
    * @returns Promise that resolves with the list of participants
    */
+  joinRoom(roomId: string, userName: string): Promise<JoinRoomResult>;
+  joinRoom(roomId: string, userId: string, userName: string): Promise<JoinRoomResult>;
   joinRoom(
     roomId: string,
-    userId: string,
-    userName: string
-  ): Promise<Participant[]> {
+    userIdOrName: string,
+    maybeUserName?: string
+  ): Promise<JoinRoomResult> {
+    const requestId = this.createRequestId("join-room");
+    const userId = maybeUserName ? userIdOrName : undefined;
+    const userName = maybeUserName ?? userIdOrName;
+
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set("join-room", { resolve, reject });
+      this.pendingRequests.set(requestId, {
+        type: "join-room",
+        resolve,
+        reject,
+      });
       try {
-        this.send({ type: "join-room", roomId, userId, userName });
+        this.send({ type: "join-room", roomId, userId, userName, requestId });
       } catch (error) {
-        this.pendingRequests.delete("join-room");
+        this.pendingRequests.delete(requestId);
         reject(error);
       }
     });
@@ -205,10 +280,22 @@ export class SignalingClient extends EventEmitter {
   /**
    * Leave the current room
    */
-  leaveRoom(): void {
-    // In the current design, leaving is handled by disconnecting
-    // or the server will handle it when the connection closes
-    // This method is here for API completeness
+  leaveRoom(userId: string): Promise<void> {
+    const requestId = this.createRequestId("leave-room");
+
+    return new Promise((resolve, reject) => {
+      this.pendingRequests.set(requestId, {
+        type: "leave-room",
+        resolve: () => resolve(),
+        reject,
+      });
+      try {
+        this.send({ type: "leave-room", userId, requestId });
+      } catch (error) {
+        this.pendingRequests.delete(requestId);
+        reject(error);
+      }
+    });
   }
 
   /**
@@ -258,12 +345,39 @@ export class SignalingClient extends EventEmitter {
    * @param requestType - Type of request to resolve
    * @param value - Value to resolve with
    */
-  private resolvePendingRequest(requestType: string, value: any): void {
-    const request = this.pendingRequests.get(requestType);
+  private resolvePendingRequest<T>(
+    requestId: string | undefined,
+    requestType: PendingRequest<T>["type"],
+    value: T,
+  ): void {
+    const request = requestId
+      ? (this.pendingRequests.get(requestId) as PendingRequest<T> | undefined)
+      : this.findPendingRequestByType<T>(requestType);
+
     if (request) {
       request.resolve(value);
-      this.pendingRequests.delete(requestType);
+      if (requestId) {
+        this.pendingRequests.delete(requestId);
+      } else {
+        this.deletePendingRequestByReference(request);
+      }
     }
+  }
+
+  private handleErrorMessage(message: Extract<SignalingMessage, { type: "error" }>): void {
+    const error = new SignalingClientError(message);
+
+    if (message.requestId) {
+      const request = this.pendingRequests.get(message.requestId);
+      if (request) {
+        request.reject(error);
+        this.pendingRequests.delete(message.requestId);
+      }
+    } else {
+      this.rejectPendingRequests(error);
+    }
+
+    this.emit("error", error);
   }
 
   /**
@@ -275,5 +389,30 @@ export class SignalingClient extends EventEmitter {
       request.reject(error);
     }
     this.pendingRequests.clear();
+  }
+
+  private createRequestId(prefix: string): string {
+    this.requestCounter += 1;
+    return `${prefix}-${Date.now()}-${this.requestCounter}`;
+  }
+
+  private findPendingRequestByType<T>(
+    requestType: PendingRequest<T>["type"],
+  ): PendingRequest<T> | undefined {
+    for (const request of this.pendingRequests.values()) {
+      if (request.type === requestType) {
+        return request as PendingRequest<T>;
+      }
+    }
+    return undefined;
+  }
+
+  private deletePendingRequestByReference(request: PendingRequest<any>): void {
+    for (const [requestId, candidate] of this.pendingRequests.entries()) {
+      if (candidate === request) {
+        this.pendingRequests.delete(requestId);
+        return;
+      }
+    }
   }
 }

@@ -265,12 +265,18 @@ describe("AvesClient Unit Tests", () => {
       // Simulate server response
       const signalingClient = (client as any).signalingClient;
       const ws = (signalingClient as any).ws as MockWebSocket;
-      ws.simulateMessage({ type: "room-joined", participants });
+      const sentMessage = JSON.parse(ws.sentMessages[0]);
+      ws.simulateMessage({
+        type: "room-joined",
+        participants,
+        userId: "canonical-user3",
+        requestId: sentMessage.requestId,
+      });
 
       const result = await joinPromise;
       expect(result).toEqual(participants);
       expect((client as any).currentRoomId).toBe("room123");
-      expect((client as any).currentUserId).toBe("user3");
+      expect((client as any).currentUserId).toBe("canonical-user3");
     });
 
     it("should store participants after joining room", async () => {
@@ -285,7 +291,13 @@ describe("AvesClient Unit Tests", () => {
 
       const signalingClient = (client as any).signalingClient;
       const ws = (signalingClient as any).ws as MockWebSocket;
-      ws.simulateMessage({ type: "room-joined", participants });
+      const sentMessage = JSON.parse(ws.sentMessages[0]);
+      ws.simulateMessage({
+        type: "room-joined",
+        participants,
+        userId: "canonical-user3",
+        requestId: sentMessage.requestId,
+      });
 
       await joinPromise;
 
@@ -295,22 +307,42 @@ describe("AvesClient Unit Tests", () => {
 
     it("should leave room and clean up", async () => {
       // First join a room
-      const joinPromise = client.joinRoom("room123", "user1", "Alice");
+      const joinPromise = client.joinRoom("room123", "Alice");
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       const signalingClient = (client as any).signalingClient;
       const ws = (signalingClient as any).ws as MockWebSocket;
-      ws.simulateMessage({ type: "room-joined", participants: [] });
+      const joinMessage = JSON.parse(ws.sentMessages[0]);
+      ws.simulateMessage({
+        type: "room-joined",
+        participants: [],
+        userId: "generated-user1",
+        requestId: joinMessage.requestId,
+      });
 
       await joinPromise;
 
       // Now leave
-      await client.leaveRoom();
+      const leavePromise = client.leaveRoom();
+      const leaveMessage = JSON.parse(ws.sentMessages[1]);
+      ws.simulateMessage({
+        type: "room-left",
+        roomId: "room123",
+        userId: "generated-user1",
+        requestId: leaveMessage.requestId,
+      });
+      await leavePromise;
 
       expect((client as any).currentRoomId).toBeNull();
       expect((client as any).currentUserId).toBeNull();
       expect(client.getParticipants()).toEqual([]);
+      expect(client.isConnected()).toBe(true);
+      expect(leaveMessage).toEqual({
+        type: "leave-room",
+        userId: "generated-user1",
+        requestId: expect.any(String),
+      });
     });
 
     it("should handle user joined event", async () => {
@@ -436,11 +468,13 @@ describe("AvesClient Unit Tests", () => {
     });
 
     it("should check if connected to signaling server", () => {
-      // Initially not connected
       expect(client.isConnected()).toBe(false);
 
-      // Set room ID to simulate connection
-      (client as any).currentRoomId = "room123";
+      const signalingClient = (client as any).signalingClient;
+      (signalingClient as any).ws = {
+        readyState: MockWebSocket.OPEN,
+        close: jest.fn(),
+      };
       expect(client.isConnected()).toBe(true);
     });
 
@@ -575,6 +609,99 @@ describe("AvesClient Unit Tests", () => {
 
       expect(stateChangeListener).toHaveBeenCalledWith("user1", "open");
     });
+
+    it("should clear prepared peer state when a peer connection disconnects", () => {
+      const webrtcManager = (client as any).webrtcManager;
+
+      (client as any).preparePeerConnection("user1");
+      expect((client as any).preparedPeers.has("user1")).toBe(true);
+
+      const callbacks = (webrtcManager as any).connectionStateCallbacks.get("user1");
+      callbacks.forEach((callback: Function) => callback("disconnected"));
+
+      expect((client as any).preparedPeers.has("user1")).toBe(false);
+    });
+
+    it("should rejoin the room after signaling reconnects", async () => {
+      const signalingClient = (client as any).signalingClient;
+      jest.spyOn(signalingClient, "joinRoom").mockResolvedValue({
+        participants: [],
+        userId: "user1",
+      });
+
+      (client as any).currentRoomId = "room123";
+      (client as any).currentUserId = "user1";
+      (client as any).currentUserName = "Alice";
+
+      signalingClient.emit("stateChange", "disconnected");
+      signalingClient.emit("stateChange", "connected");
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(signalingClient.joinRoom).toHaveBeenCalledWith(
+        "room123",
+        "user1",
+        "Alice",
+      );
+    });
+  });
+
+  describe("Client reuse", () => {
+    beforeEach(() => {
+      client = new AvesClient({ signalingUrl: testUrl });
+    });
+
+    it("should keep forwarding WebRTC events after leaveRoom and rejoin", async () => {
+      const messageListener = jest.fn();
+      client.on("message", messageListener);
+
+      let joinPromise = client.joinRoom("room123", "user1", "Alice");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      let signalingClient = (client as any).signalingClient;
+      let ws = (signalingClient as any).ws as MockWebSocket;
+      let joinMessage = JSON.parse(ws.sentMessages[0]);
+      ws.simulateMessage({
+        type: "room-joined",
+        participants: [],
+        userId: "user1",
+        requestId: joinMessage.requestId,
+      });
+      await joinPromise;
+
+      const leavePromise = client.leaveRoom();
+      const leaveMessage = JSON.parse(ws.sentMessages[1]);
+      ws.simulateMessage({
+        type: "room-left",
+        roomId: "room123",
+        userId: "user1",
+        requestId: leaveMessage.requestId,
+      });
+      await leavePromise;
+
+      joinPromise = client.joinRoom("room123", "user1", "Alice");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      signalingClient = (client as any).signalingClient;
+      ws = (signalingClient as any).ws as MockWebSocket;
+      joinMessage = JSON.parse(ws.sentMessages[2]);
+      ws.simulateMessage({
+        type: "room-joined",
+        participants: [],
+        userId: "user1",
+        requestId: joinMessage.requestId,
+      });
+      await joinPromise;
+
+      const webrtcManager = (client as any).webrtcManager;
+      const messageCallbacks = (webrtcManager as any).messageCallbacks;
+      expect(messageCallbacks.size).toBeGreaterThan(0);
+
+      messageCallbacks.forEach((callback: Function) => {
+        callback("user2", { text: "rejoined" });
+      });
+
+      expect(messageListener).toHaveBeenCalledWith("user2", { text: "rejoined" });
+    });
   });
 
   describe("Edge cases", () => {
@@ -622,6 +749,11 @@ describe("AvesClient Unit Tests", () => {
     });
 
     it("should handle isConnected when never connected", () => {
+      expect(client.isConnected()).toBe(false);
+    });
+
+    it("should not report connected from stale room state alone", () => {
+      (client as any).currentRoomId = "room123";
       expect(client.isConnected()).toBe(false);
     });
   });

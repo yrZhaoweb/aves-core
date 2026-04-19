@@ -16,6 +16,16 @@ export { SignalingClient } from "./core/SignalingClient";
 export type {
   Participant,
   AvesClientConfig,
+  FileTransferOptions,
+  FileTransferInfo,
+  FileTransferProgress,
+  FileTransferResult,
+  LocalAudioState,
   SignalingMessage,
+  SignalingErrorCode,
+  SignalingErrorStage,
+  SignalingErrorPayload,
+  JoinRoomResult,
+  LeaveRoomResult,
   ReconnectConfig,
 } from "./types/types";

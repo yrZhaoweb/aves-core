@@ -169,6 +169,17 @@ describe("SignalingClient Unit Tests", () => {
         client.disconnect();
       }).not.toThrow();
     });
+
+    it("should report connection state from the underlying WebSocket", async () => {
+      expect(client.isConnected()).toBe(false);
+
+      await client.connect(testUrl);
+      expect(client.isConnected()).toBe(true);
+
+      const ws = (client as any).ws as MockWebSocket;
+      ws.readyState = MockWebSocket.CLOSED;
+      expect(client.isConnected()).toBe(false);
+    });
   });
 
   describe("Reconnection logic", () => {
@@ -228,11 +239,21 @@ describe("SignalingClient Unit Tests", () => {
     it("should send create-room message", async () => {
       await client.connect(testUrl);
 
-      client.createRoom();
+      const roomPromise = client.createRoom();
 
       const ws = (client as any).ws as MockWebSocket;
       const sentMessage = JSON.parse(ws.sentMessages[0]);
-      expect(sentMessage).toEqual({ type: "create-room" });
+      expect(sentMessage).toEqual({
+        type: "create-room",
+        requestId: expect.any(String),
+      });
+
+      ws.simulateMessage({
+        type: "room-created",
+        roomId: "room123",
+        requestId: sentMessage.requestId,
+      });
+      await roomPromise;
     });
 
     it("should join a room", async () => {
@@ -247,16 +268,25 @@ describe("SignalingClient Unit Tests", () => {
 
       // Simulate server response
       const ws = (client as any).ws as MockWebSocket;
-      ws.simulateMessage({ type: "room-joined", participants });
+      const sentMessage = JSON.parse(ws.sentMessages[0]);
+      ws.simulateMessage({
+        type: "room-joined",
+        participants,
+        userId: "user3",
+        requestId: sentMessage.requestId,
+      });
 
       const result = await joinPromise;
-      expect(result).toEqual(participants);
+      expect(result).toEqual({
+        participants,
+        userId: "user3",
+      });
     });
 
     it("should send join-room message with correct parameters", async () => {
       await client.connect(testUrl);
 
-      client.joinRoom("room123", "user1", "Alice");
+      const joinPromise = client.joinRoom("room123", "user1", "Alice");
 
       const ws = (client as any).ws as MockWebSocket;
       const sentMessage = JSON.parse(ws.sentMessages[0]);
@@ -265,6 +295,42 @@ describe("SignalingClient Unit Tests", () => {
         roomId: "room123",
         userId: "user1",
         userName: "Alice",
+        requestId: expect.any(String),
+      });
+
+      ws.simulateMessage({
+        type: "room-joined",
+        participants: [],
+        userId: "user1",
+        requestId: sentMessage.requestId,
+      });
+      await joinPromise;
+    });
+
+    it("should allow joining without a caller-supplied userId", async () => {
+      await client.connect(testUrl);
+
+      const joinPromise = client.joinRoom("room123", "Alice");
+
+      const ws = (client as any).ws as MockWebSocket;
+      const sentMessage = JSON.parse(ws.sentMessages[0]);
+      expect(sentMessage).toEqual({
+        type: "join-room",
+        roomId: "room123",
+        userName: "Alice",
+        requestId: expect.any(String),
+      });
+
+      ws.simulateMessage({
+        type: "room-joined",
+        participants: [],
+        userId: "generated-user",
+        requestId: sentMessage.requestId,
+      });
+
+      await expect(joinPromise).resolves.toEqual({
+        participants: [],
+        userId: "generated-user",
       });
     });
 
@@ -281,9 +347,51 @@ describe("SignalingClient Unit Tests", () => {
 
       // Simulate server error response
       const ws = (client as any).ws as MockWebSocket;
-      ws.simulateMessage({ type: "error", message: "Room creation failed" });
+      const sentMessage = JSON.parse(ws.sentMessages[0]);
+      ws.simulateMessage({
+        type: "error",
+        message: "Room creation failed",
+        code: "ROOM_CREATE_FAILED",
+        stage: "room",
+        retryable: false,
+        requestId: sentMessage.requestId,
+      });
 
       await expect(roomPromise).rejects.toThrow("Room creation failed");
+    });
+
+    it("should correlate concurrent room requests by requestId", async () => {
+      await client.connect(testUrl);
+
+      const firstJoinPromise = client.joinRoom("room-a", "user-a", "Alice");
+      const secondJoinPromise = client.joinRoom("room-b", "Bob");
+
+      const ws = (client as any).ws as MockWebSocket;
+      const [firstRequest, secondRequest] = ws.sentMessages.map((message) =>
+        JSON.parse(message),
+      );
+
+      ws.simulateMessage({
+        type: "room-joined",
+        participants: [{ id: "user-a", name: "Alice" }],
+        userId: "generated-bob",
+        requestId: secondRequest.requestId,
+      });
+      ws.simulateMessage({
+        type: "room-joined",
+        participants: [{ id: "user-b", name: "Bob" }],
+        userId: "user-a",
+        requestId: firstRequest.requestId,
+      });
+
+      await expect(firstJoinPromise).resolves.toEqual({
+        participants: [{ id: "user-b", name: "Bob" }],
+        userId: "user-a",
+      });
+      await expect(secondJoinPromise).resolves.toEqual({
+        participants: [{ id: "user-a", name: "Alice" }],
+        userId: "generated-bob",
+      });
     });
   });
 
@@ -484,11 +592,20 @@ describe("SignalingClient Unit Tests", () => {
       client.on("error", errorListener);
 
       const ws = (client as any).ws as MockWebSocket;
-      ws.simulateMessage({ type: "error", message: "Something went wrong" });
+      ws.simulateMessage({
+        type: "error",
+        message: "Something went wrong",
+        code: "ROOM_JOIN_FAILED",
+        stage: "room",
+        retryable: false,
+      });
 
       expect(errorListener).toHaveBeenCalledWith(
         expect.objectContaining({
           message: "Something went wrong",
+          code: "ROOM_JOIN_FAILED",
+          stage: "room",
+          retryable: false,
         })
       );
     });
@@ -518,7 +635,23 @@ describe("SignalingClient Unit Tests", () => {
       const joinPromise = client.joinRoom("room123", "user1", "Alice");
 
       const ws = (client as any).ws as MockWebSocket;
-      ws.simulateMessage({ type: "error", message: "Server error" });
+      const sentMessages = ws.sentMessages.map((message) => JSON.parse(message));
+      ws.simulateMessage({
+        type: "error",
+        message: "Server error",
+        code: "SERVER_ERROR",
+        stage: "room",
+        retryable: true,
+        requestId: sentMessages[0].requestId,
+      });
+      ws.simulateMessage({
+        type: "error",
+        message: "Server error",
+        code: "SERVER_ERROR",
+        stage: "room",
+        retryable: true,
+        requestId: sentMessages[1].requestId,
+      });
 
       await expect(roomPromise).rejects.toThrow("Server error");
       await expect(joinPromise).rejects.toThrow("Server error");
@@ -536,28 +669,39 @@ describe("SignalingClient Unit Tests", () => {
       expect(errorListener).toHaveBeenCalled();
     });
 
-    it("should clean up pending requests on disconnect", async () => {
+    it("should reject pending requests on disconnect", async () => {
       await client.connect(testUrl);
 
       const roomPromise = client.createRoom();
 
       client.disconnect();
 
-      // Pending request should still be pending (not resolved or rejected)
-      // This is expected behavior - disconnect doesn't reject pending requests
-      const pendingRequests = (client as any).pendingRequests;
-      expect(pendingRequests.size).toBe(1);
+      await expect(roomPromise).rejects.toThrow("Signaling connection closed");
     });
   });
 
   describe("Edge cases", () => {
-    it("should handle leaveRoom call", async () => {
+    it("should send leave-room and wait for room-left acknowledgment", async () => {
       await client.connect(testUrl);
 
-      // leaveRoom is a no-op in current implementation
-      expect(() => {
-        client.leaveRoom();
-      }).not.toThrow();
+      const leavePromise = client.leaveRoom("user1");
+
+      const ws = (client as any).ws as MockWebSocket;
+      const sentMessage = JSON.parse(ws.sentMessages[0]);
+      expect(sentMessage).toEqual({
+        type: "leave-room",
+        userId: "user1",
+        requestId: expect.any(String),
+      });
+
+      ws.simulateMessage({
+        type: "room-left",
+        roomId: "room123",
+        userId: "user1",
+        requestId: sentMessage.requestId,
+      });
+
+      await expect(leavePromise).resolves.toBeUndefined();
     });
 
     it("should handle receiving unknown message types", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "@yrzhao/aves-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "WebRTC client library for real-time communication",
   "main": "dist/index.js",
   "module": "dist/esm/index.js",

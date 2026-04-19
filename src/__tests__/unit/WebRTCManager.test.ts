@@ -282,7 +282,7 @@ describe("WebRTCManager Unit Tests", () => {
       // Manually set up DataChannel
       const dataChannel = new MockRTCDataChannel("data");
       dataChannel.readyState = "open";
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
 
       const sendSpy = jest.spyOn(dataChannel, "send");
       const message = { type: "test", content: "hello" };
@@ -307,7 +307,7 @@ describe("WebRTCManager Unit Tests", () => {
       // Manually set up DataChannel in connecting state
       const dataChannel = new MockRTCDataChannel("data");
       dataChannel.readyState = "connecting";
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
 
       const message = { type: "test", content: "hello" };
 
@@ -323,8 +323,8 @@ describe("WebRTCManager Unit Tests", () => {
       const peer2Channel = new MockRTCDataChannel("data");
       peer2Channel.readyState = "open";
 
-      (manager as any).dataChannels.set("peer1", peer1Channel);
-      (manager as any).dataChannels.set("peer2", peer2Channel);
+      (manager as any).dataChannels.set("peer1", { message: peer1Channel });
+      (manager as any).dataChannels.set("peer2", { message: peer2Channel });
 
       const sendSpy1 = jest.spyOn(peer1Channel, "send");
       const sendSpy2 = jest.spyOn(peer2Channel, "send");
@@ -343,8 +343,8 @@ describe("WebRTCManager Unit Tests", () => {
       const peer2Channel = new MockRTCDataChannel("data");
       peer2Channel.readyState = "connecting";
 
-      (manager as any).dataChannels.set("peer1", peer1Channel);
-      (manager as any).dataChannels.set("peer2", peer2Channel);
+      (manager as any).dataChannels.set("peer1", { message: peer1Channel });
+      (manager as any).dataChannels.set("peer2", { message: peer2Channel });
 
       const message = { type: "broadcast", content: "hello all" };
 
@@ -362,7 +362,7 @@ describe("WebRTCManager Unit Tests", () => {
 
       // Manually set up DataChannel
       const dataChannel = new MockRTCDataChannel("data");
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
 
       // Manually trigger setupDataChannel to set up message handler
       (manager as any).setupDataChannel(peerId, dataChannel);
@@ -387,7 +387,7 @@ describe("WebRTCManager Unit Tests", () => {
 
       // Manually set up DataChannel
       const dataChannel = new MockRTCDataChannel("data");
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
       (manager as any).setupDataChannel(peerId, dataChannel);
 
       // Mock console.error to verify it's called
@@ -433,7 +433,7 @@ describe("WebRTCManager Unit Tests", () => {
 
       // Manually set up DataChannel
       const dataChannel = new MockRTCDataChannel("data");
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
       (manager as any).setupDataChannel(peerId, dataChannel);
 
       // Simulate DataChannel opening
@@ -461,7 +461,7 @@ describe("WebRTCManager Unit Tests", () => {
 
       const dataChannel = new MockRTCDataChannel("data");
       dataChannel.readyState = "open";
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
 
       expect(manager.isDataChannelReady(peerId)).toBe(true);
     });
@@ -472,7 +472,7 @@ describe("WebRTCManager Unit Tests", () => {
       const peerId = "peer1";
       const pc = manager.createPeerConnection(peerId) as any;
       const dataChannel = new MockRTCDataChannel("data");
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
 
       const pcCloseSpy = jest.spyOn(pc, "close");
       const dcCloseSpy = jest.spyOn(dataChannel, "close");
@@ -496,8 +496,8 @@ describe("WebRTCManager Unit Tests", () => {
 
       const dc1 = new MockRTCDataChannel("data");
       const dc2 = new MockRTCDataChannel("data");
-      (manager as any).dataChannels.set("peer1", dc1);
-      (manager as any).dataChannels.set("peer2", dc2);
+      (manager as any).dataChannels.set("peer1", { message: dc1 });
+      (manager as any).dataChannels.set("peer2", { message: dc2 });
 
       const pc1CloseSpy = jest.spyOn(pc1, "close");
       const pc2CloseSpy = jest.spyOn(pc2, "close");
@@ -518,7 +518,7 @@ describe("WebRTCManager Unit Tests", () => {
       const pc = manager.createPeerConnection(peerId) as any;
 
       const dataChannel = new MockRTCDataChannel("data");
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
 
       // Simulate connection failure
       pc.connectionState = "failed";
@@ -579,7 +579,7 @@ describe("WebRTCManager Unit Tests", () => {
 
       const dataChannel = new MockRTCDataChannel("data");
       dataChannel.readyState = "open";
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
 
       // Create a circular reference that will fail JSON.stringify
       const circularMessage: any = { type: "test" };
@@ -599,7 +599,7 @@ describe("WebRTCManager Unit Tests", () => {
         .mockImplementation(() => {});
 
       const dataChannel = new MockRTCDataChannel("data");
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
       (manager as any).setupDataChannel(peerId, dataChannel);
 
       // Simulate DataChannel error
@@ -619,7 +619,7 @@ describe("WebRTCManager Unit Tests", () => {
       manager.createPeerConnection(peerId);
 
       const dataChannel = new MockRTCDataChannel("data");
-      (manager as any).dataChannels.set(peerId, dataChannel);
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
       (manager as any).setupDataChannel(peerId, dataChannel);
 
       expect((manager as any).dataChannels.has(peerId)).toBe(true);
@@ -628,6 +628,108 @@ describe("WebRTCManager Unit Tests", () => {
       dataChannel.close();
 
       expect((manager as any).dataChannels.has(peerId)).toBe(false);
+    });
+  });
+
+  describe("File transfer safeguards", () => {
+    it("should reject non-positive chunk sizes", async () => {
+      const peerId = "peer1";
+      manager.createPeerConnection(peerId);
+
+      const messageChannel = new MockRTCDataChannel("data");
+      messageChannel.readyState = "open";
+      const fileChannel = new MockRTCDataChannel("file");
+      fileChannel.readyState = "open";
+      (manager as any).dataChannels.set(peerId, {
+        message: messageChannel,
+        file: fileChannel,
+      });
+
+      await expect(
+        manager.sendFile(new Blob(["hi"]), { peerId, chunkSize: 0 }),
+      ).rejects.toThrow("chunkSize must be a positive integer");
+    });
+
+    it("should wait for receiver acknowledgement before reporting completion", async () => {
+      const peerId = "peer1";
+      manager.createPeerConnection(peerId);
+
+      const completedCallback = jest.fn();
+      manager.onFileTransferCompleted(completedCallback);
+
+      const messageChannel = new MockRTCDataChannel("data");
+      messageChannel.readyState = "open";
+      const fileChannel = new MockRTCDataChannel("file");
+      fileChannel.readyState = "open";
+      (manager as any).dataChannels.set(peerId, {
+        message: messageChannel,
+        file: fileChannel,
+      });
+
+      jest.spyOn(messageChannel, "send").mockImplementation((data: string) => {
+        const parsed = JSON.parse(data);
+        if (parsed.kind === "file-meta") {
+          (manager as any).handleFileControlMessage(peerId, {
+            __aves: "aves:file-control",
+            kind: "file-ready",
+            transferId: parsed.transfer.transferId,
+          });
+        }
+      });
+
+      const sendPromise = manager.sendFile(new Blob(["hi"]), { peerId });
+      for (let attempt = 0; attempt < 10; attempt++) {
+        if ((manager as any).completionResolvers.has(peerId)) {
+          break;
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      expect(completedCallback).not.toHaveBeenCalled();
+      expect((manager as any).completionResolvers.has(peerId)).toBe(true);
+
+      const transfer = (manager as any).outgoingTransfers.get(peerId);
+      expect(transfer).toBeDefined();
+
+      (manager as any).handleFileControlMessage(peerId, {
+        __aves: "aves:file-control",
+        kind: "file-complete",
+        transferId: transfer.transferId,
+      });
+
+      await expect(sendPromise).resolves.toHaveLength(1);
+      expect(completedCallback).toHaveBeenCalledWith(
+        peerId,
+        expect.objectContaining({ transferId: transfer.transferId }),
+      );
+    });
+
+    it("should emit transfer failure when a peer closes mid-transfer", () => {
+      const peerId = "peer1";
+      manager.createPeerConnection(peerId);
+
+      const failedCallback = jest.fn();
+      manager.onFileTransferFailed(failedCallback);
+
+      (manager as any).outgoingTransfers.set(peerId, {
+        transferId: "transfer-1",
+        peerId,
+        direction: "send",
+        name: "demo.txt",
+        size: 4,
+        mimeType: "text/plain",
+        lastModified: 1,
+        blob: new Blob(["demo"]),
+        chunkSize: 4,
+      });
+
+      manager.closePeerConnection(peerId);
+
+      expect(failedCallback).toHaveBeenCalledWith(
+        peerId,
+        expect.objectContaining({ transferId: "transfer-1" }),
+        expect.any(Error),
+      );
     });
   });
 });
