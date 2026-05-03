@@ -1,26 +1,55 @@
 import { EventEmitter } from "./EventEmitter";
+import { AvesError } from "./AvesError";
 import { WebRTCManager } from "./WebRTCManager";
 import { SignalingClient } from "./SignalingClient";
 import {
   AvesClientConfig,
+  AvesMessage,
+  AvesVideoConstraints,
   FileTransferInfo,
   FileTransferOptions,
   FileTransferProgress,
   FileTransferResult,
   LocalAudioState,
+  LocalVideoState,
   Participant,
+  ScreenShareState,
 } from "../types/types";
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export type AvesClientEvents = {
+  signalingStateChange: [state: string];
+  error: [error: AvesError];
+  userJoined: [user: Participant];
+  userLeft: [userId: string];
+  connectionStateChange: [peerId: string, state: RTCPeerConnectionState];
+  dataChannelStateChange: [peerId: string, state: RTCDataChannelState];
+  message: [peerId: string, message: AvesMessage];
+  remoteAudioTrack: [peerId: string, stream: MediaStream, track: MediaStreamTrack];
+  remoteVideoTrack: [peerId: string, stream: MediaStream, track: MediaStreamTrack];
+  localAudioStateChange: [state: LocalAudioState];
+  localVideoStateChange: [state: LocalVideoState];
+  screenShareStateChange: [state: ScreenShareState];
+  fileTransferStarted: [peerId: string, info: FileTransferInfo];
+  fileTransferProgress: [peerId: string, progress: FileTransferProgress];
+  fileTransferCompleted: [peerId: string, result: FileTransferResult];
+  fileTransferFailed: [peerId: string, info: FileTransferInfo | null, error: AvesError];
+};
 
 /**
  * AvesClient - Main client class for WebRTC communication.
  */
-export class AvesClient extends EventEmitter {
+export class AvesClient extends EventEmitter<AvesClientEvents> {
   private config: Required<
     Pick<AvesClientConfig, "signalingUrl" | "iceServers" | "fileChunkSize" | "debug">
   > & {
     reconnect: {
       maxAttempts: number;
       delay: number;
+      requestTimeoutMs: number;
     };
   };
   private webrtcManager: WebRTCManager;
@@ -37,6 +66,7 @@ export class AvesClient extends EventEmitter {
 
     const maxAttempts = config.reconnect?.maxAttempts ?? 5;
     const delay = config.reconnect?.delay ?? 3000;
+    const requestTimeoutMs = config.reconnect?.requestTimeoutMs ?? 30_000;
 
     this.config = {
       signalingUrl: config.signalingUrl,
@@ -47,6 +77,7 @@ export class AvesClient extends EventEmitter {
       reconnect: {
         maxAttempts,
         delay,
+        requestTimeoutMs,
       },
       debug: config.debug ?? false,
     };
@@ -54,10 +85,12 @@ export class AvesClient extends EventEmitter {
     this.webrtcManager = new WebRTCManager(
       this.config.iceServers,
       this.config.fileChunkSize,
+      config.video,
     );
     this.signalingClient = new SignalingClient({
       maxAttempts,
       delay,
+      requestTimeoutMs,
     });
 
     this.setupEventHandlers();
@@ -82,7 +115,7 @@ export class AvesClient extends EventEmitter {
       }
     });
 
-    this.signalingClient.on("error", (error: Error) => {
+    this.signalingClient.on("error", (error: AvesError) => {
       this.emit("error", error);
     });
 
@@ -115,7 +148,7 @@ export class AvesClient extends EventEmitter {
         } catch (error) {
           this.emit(
             "error",
-            new Error(`Failed to handle offer from ${fromId}: ${error}`),
+            new AvesError({ message: `Failed to handle offer from ${fromId}: ${errorMessage(error)}`, code: "SERVER_ERROR", stage: "signaling", retryable: true, peerId: fromId }),
           );
         }
       },
@@ -129,7 +162,7 @@ export class AvesClient extends EventEmitter {
         } catch (error) {
           this.emit(
             "error",
-            new Error(`Failed to handle answer from ${fromId}: ${error}`),
+            new AvesError({ message: `Failed to handle answer from ${fromId}: ${errorMessage(error)}`, code: "SERVER_ERROR", stage: "signaling", retryable: true, peerId: fromId }),
           );
         }
       },
@@ -143,13 +176,13 @@ export class AvesClient extends EventEmitter {
         } catch (error) {
           this.emit(
             "error",
-            new Error(`Failed to add ICE candidate from ${fromId}: ${error}`),
+            new AvesError({ message: `Failed to add ICE candidate from ${fromId}: ${errorMessage(error)}`, code: "WEBRTC_ICE_FAILED", stage: "transport", retryable: true, peerId: fromId }),
           );
         }
       },
     );
 
-    this.webrtcManager.onMessage((peerId: string, message: any) => {
+    this.webrtcManager.onMessage((peerId: string, message: AvesMessage) => {
       this.emit("message", peerId, message);
     });
 
@@ -172,7 +205,7 @@ export class AvesClient extends EventEmitter {
     );
 
     this.webrtcManager.onFileTransferFailed(
-      (peerId: string, info: FileTransferInfo | null, error: Error) => {
+      (peerId: string, info: FileTransferInfo | null, error: AvesError) => {
         this.emit("fileTransferFailed", peerId, info, error);
       },
     );
@@ -185,6 +218,24 @@ export class AvesClient extends EventEmitter {
 
     this.webrtcManager.onLocalAudioStateChange((state: LocalAudioState) => {
       this.emit("localAudioStateChange", state);
+    });
+
+    this.webrtcManager.onRemoteVideoTrack(
+      (peerId: string, stream: MediaStream, track: MediaStreamTrack) => {
+        this.emit("remoteVideoTrack", peerId, stream, track);
+      },
+    );
+
+    this.webrtcManager.onLocalVideoStateChange((state: LocalVideoState) => {
+      this.emit("localVideoStateChange", state);
+    });
+
+    this.webrtcManager.onScreenShareStateChange((state: ScreenShareState) => {
+      this.emit("screenShareStateChange", state);
+    });
+
+    this.webrtcManager.onError((err: AvesError) => {
+      this.emit("error", err);
     });
   }
 
@@ -227,7 +278,7 @@ export class AvesClient extends EventEmitter {
       this.preparedPeers.clear();
       this.emit(
         "error",
-        new Error(`Failed to restore room session: ${error}`),
+        new AvesError({ message: `Failed to restore room session: ${errorMessage(error)}`, code: "SERVER_ERROR", stage: "room", retryable: true, roomId: this.currentRoomId ?? undefined }),
       );
     }
   }
@@ -279,7 +330,7 @@ export class AvesClient extends EventEmitter {
     } catch (error) {
       this.emit(
         "error",
-        new Error(`Failed to initiate connection with ${peerId}: ${error}`),
+        new AvesError({ message: `Failed to initiate connection with ${peerId}: ${errorMessage(error)}`, code: "WEBRTC_CONNECTION_FAILED", stage: "transport", retryable: true, peerId }),
       );
     }
   }
@@ -351,11 +402,11 @@ export class AvesClient extends EventEmitter {
     this.shouldRestoreSession = false;
   }
 
-  sendMessage(message: any): void {
+  sendMessage(message: AvesMessage): void {
     this.webrtcManager.sendMessage(message);
   }
 
-  sendMessageToPeer(peerId: string, message: any): void {
+  sendMessageToPeer(peerId: string, message: AvesMessage): void {
     this.webrtcManager.sendMessageToPeer(peerId, message);
   }
 
@@ -386,8 +437,44 @@ export class AvesClient extends EventEmitter {
     return this.webrtcManager.getRemoteAudioStream(peerId);
   }
 
+  // --- Video ---
+
+  async startVideo(constraints?: AvesVideoConstraints): Promise<MediaStream> {
+    return this.webrtcManager.startVideo(constraints);
+  }
+
+  stopVideo(): void {
+    this.webrtcManager.stopVideo();
+  }
+
+  setVideoMuted(muted: boolean): void {
+    this.webrtcManager.setVideoMuted(muted);
+  }
+
+  getLocalVideoState(): LocalVideoState {
+    return this.webrtcManager.getLocalVideoState();
+  }
+
+  getRemoteVideoStream(peerId: string): MediaStream | null {
+    return this.webrtcManager.getRemoteVideoStream(peerId);
+  }
+
+  // --- Screen Share ---
+
+  async startScreenShare(): Promise<MediaStream> {
+    return this.webrtcManager.startScreenShare();
+  }
+
+  stopScreenShare(): void {
+    this.webrtcManager.stopScreenShare();
+  }
+
+  getScreenShareState(): ScreenShareState {
+    return this.webrtcManager.getScreenShareState();
+  }
+
   getConnectionState(peerId: string): RTCPeerConnectionState {
-    return this.webrtcManager.isConnected(peerId) ? "connected" : "closed";
+    return this.webrtcManager.getConnectionState(peerId);
   }
 
   getParticipants(): Participant[] {

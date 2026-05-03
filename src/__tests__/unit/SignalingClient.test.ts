@@ -228,9 +228,14 @@ describe("SignalingClient Unit Tests", () => {
 
       const roomPromise = client.createRoom();
 
-      // Simulate server response
+      // Simulate server response (must include requestId)
       const ws = (client as any).ws as MockWebSocket;
-      ws.simulateMessage({ type: "room-created", roomId: "room123" });
+      const sentMessage = JSON.parse(ws.sentMessages[0]);
+      ws.simulateMessage({
+        type: "room-created",
+        roomId: "room123",
+        requestId: sentMessage.requestId,
+      });
 
       const roomId = await roomPromise;
       expect(roomId).toBe("room123");
@@ -577,10 +582,17 @@ describe("SignalingClient Unit Tests", () => {
       });
     });
 
-    it("should throw error when sending while disconnected", async () => {
-      expect(() => {
-        client.sendOffer("user2", "user1", { type: "offer", sdp: "sdp" });
-      }).toThrow("WebSocket is not connected");
+    it("should emit error when sending while disconnected", async () => {
+      const errorListener = jest.fn();
+      client.on("error", errorListener);
+
+      client.sendOffer("user2", "user1", { type: "offer", sdp: "sdp" });
+
+      expect(errorListener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("Failed to send offer"),
+        }),
+      );
     });
   });
 
@@ -657,6 +669,68 @@ describe("SignalingClient Unit Tests", () => {
       await expect(joinPromise).rejects.toThrow("Server error");
     });
 
+    it("should keep pending requests alive when an uncorrelated signaling error arrives", async () => {
+      await client.connect(testUrl);
+
+      const errorListener = jest.fn();
+      client.on("error", errorListener);
+
+      const roomPromise = client.createRoom();
+      const ws = (client as any).ws as MockWebSocket;
+      const sentMessage = JSON.parse(ws.sentMessages[0]);
+
+      ws.simulateMessage({
+        type: "error",
+        message: "Rejected answer: user is not joined to a room",
+        code: "SIGNALING_NOT_AUTHENTICATED",
+        stage: "signaling",
+        retryable: false,
+      });
+
+      expect(errorListener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "SIGNALING_NOT_AUTHENTICATED",
+        }),
+      );
+
+      ws.simulateMessage({
+        type: "room-created",
+        roomId: "room-after-late-signaling-error",
+        requestId: sentMessage.requestId,
+      });
+
+      await expect(roomPromise).resolves.toBe("room-after-late-signaling-error");
+    });
+
+    it("should reject pending room requests when the server does not respond before the request timeout", async () => {
+      jest.useFakeTimers();
+      const timeoutClient = new SignalingClient({
+        maxAttempts: 3,
+        delay: 100,
+        requestTimeoutMs: 50,
+      });
+
+      try {
+        const connectPromise = timeoutClient.connect(testUrl);
+        jest.runOnlyPendingTimers();
+        await connectPromise;
+
+        const roomPromise = timeoutClient.createRoom();
+        jest.advanceTimersByTime(50);
+
+        await expect(roomPromise).rejects.toMatchObject({
+          message: "Signaling request create-room timed out after 50ms",
+          code: "SIGNALING_REQUEST_TIMEOUT",
+          stage: "transport",
+          retryable: true,
+        });
+        expect((timeoutClient as any).pendingRequests.size).toBe(0);
+      } finally {
+        timeoutClient.disconnect();
+        jest.useRealTimers();
+      }
+    });
+
     it("should handle WebSocket errors gracefully", async () => {
       const errorListener = jest.fn();
       client.on("error", errorListener);
@@ -677,6 +751,45 @@ describe("SignalingClient Unit Tests", () => {
       client.disconnect();
 
       await expect(roomPromise).rejects.toThrow("Signaling connection closed");
+    });
+
+    it("should reject same-type pending requests when a room response has no requestId", async () => {
+      await client.connect(testUrl);
+
+      const roomPromise = client.createRoom();
+      const ws = (client as any).ws as MockWebSocket;
+
+      ws.simulateMessage({
+        type: "room-created",
+        roomId: "room-without-request-id",
+      } as SignalingMessage);
+
+      await expect(roomPromise).rejects.toThrow(
+        "Server responded to create-room without requestId",
+      );
+    });
+
+    it("should tolerate deleting a missing pending request", () => {
+      expect(() => {
+        (client as any).deletePendingRequest("missing-request");
+      }).not.toThrow();
+    });
+
+    it("should report non-Error WebSocket construction failures", async () => {
+      const originalWebSocket = (global as any).WebSocket;
+      (global as any).WebSocket = class {
+        constructor() {
+          throw "constructor exploded";
+        }
+      };
+
+      try {
+        await expect(client.connect(testUrl)).rejects.toThrow(
+          "WebSocket construction failed: constructor exploded",
+        );
+      } finally {
+        (global as any).WebSocket = originalWebSocket;
+      }
     });
   });
 
@@ -726,16 +839,26 @@ describe("SignalingClient Unit Tests", () => {
       // Check that promise is created
       expect(room1Promise).toBeInstanceOf(Promise);
 
-      // Simulate response
+      // Simulate response with matching requestId
       const ws = (client as any).ws as MockWebSocket;
-      ws.simulateMessage({ type: "room-created", roomId: "room123" });
+      const msg1 = JSON.parse(ws.sentMessages[0]);
+      ws.simulateMessage({
+        type: "room-created",
+        roomId: "room123",
+        requestId: msg1.requestId,
+      });
 
       const room1 = await room1Promise;
       expect(room1).toBe("room123");
 
       // Send second request
       const room2Promise = client.createRoom();
-      ws.simulateMessage({ type: "room-created", roomId: "room456" });
+      const msg2 = JSON.parse(ws.sentMessages[1]);
+      ws.simulateMessage({
+        type: "room-created",
+        roomId: "room456",
+        requestId: msg2.requestId,
+      });
 
       const room2 = await room2Promise;
       expect(room2).toBe("room456");

@@ -132,7 +132,7 @@ describe("WebRTCManager Property Tests", () => {
 
     /**
      * Property: Primitive types should be preserved through round-trip
-     * Note: Only JSON-safe numbers are tested (no Infinity, -Infinity, NaN)
+     * Note: Only JSON-stable numbers are tested (no Infinity, -Infinity, NaN, -0)
      * **Validates: Requirements 3.5, 15.6**
      */
     it("should preserve primitive types through round-trip", () => {
@@ -141,7 +141,7 @@ describe("WebRTCManager Property Tests", () => {
           fc.oneof(
             fc.string(),
             fc.integer(),
-            fc.float().filter((n) => Number.isFinite(n)), // Only finite numbers
+            fc.float().filter((n) => Number.isFinite(n) && !Object.is(n, -0)),
             fc.boolean(),
             fc.constant(null)
           ),
@@ -188,7 +188,7 @@ describe("WebRTCManager Property Tests", () => {
             fc.constant(-0),
             fc.constant(Number.MAX_SAFE_INTEGER),
             fc.constant(Number.MIN_SAFE_INTEGER),
-            fc.float()
+            fc.double({ noNaN: true, noDefaultInfinity: true })
           ),
           (original) => {
             const serialized = JSON.stringify(original);

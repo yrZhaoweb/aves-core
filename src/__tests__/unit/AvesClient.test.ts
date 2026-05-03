@@ -156,6 +156,7 @@ describe("AvesClient Unit Tests", () => {
       const config = (client as any).config;
       expect(config.reconnect.maxAttempts).toBe(5);
       expect(config.reconnect.delay).toBe(3000);
+      expect(config.reconnect.requestTimeoutMs).toBe(30000);
     });
 
     it("should apply default debug flag as false", () => {
@@ -190,12 +191,14 @@ describe("AvesClient Unit Tests", () => {
         reconnect: {
           maxAttempts: 10,
           delay: 5000,
+          requestTimeoutMs: 12000,
         },
       });
 
       const config = (client as any).config;
       expect(config.reconnect.maxAttempts).toBe(10);
       expect(config.reconnect.delay).toBe(5000);
+      expect(config.reconnect.requestTimeoutMs).toBe(12000);
     });
 
     it("should use provided debug flag", () => {
@@ -219,6 +222,7 @@ describe("AvesClient Unit Tests", () => {
       const config = (client as any).config;
       expect(config.reconnect.maxAttempts).toBe(7);
       expect(config.reconnect.delay).toBe(3000); // default
+      expect(config.reconnect.requestTimeoutMs).toBe(30000); // default
     });
 
     it("should store signaling URL correctly", () => {
@@ -241,10 +245,15 @@ describe("AvesClient Unit Tests", () => {
       // Wait for connection
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      // Simulate server response
+      // Simulate server response with matching requestId
       const signalingClient = (client as any).signalingClient;
       const ws = (signalingClient as any).ws as MockWebSocket;
-      ws.simulateMessage({ type: "room-created", roomId: "room123" });
+      const sentMessage = JSON.parse(ws.sentMessages[0]);
+      ws.simulateMessage({
+        type: "room-created",
+        roomId: "room123",
+        requestId: sentMessage.requestId,
+      });
 
       const roomId = await roomPromise;
       expect(roomId).toBe("room123");
@@ -442,6 +451,97 @@ describe("AvesClient Unit Tests", () => {
     });
   });
 
+  describe("Facade methods", () => {
+    beforeEach(() => {
+      client = new AvesClient({ signalingUrl: testUrl });
+    });
+
+    it("should delegate file and media controls to WebRTCManager", async () => {
+      const webrtcManager = (client as any).webrtcManager;
+      const audioStream = {} as MediaStream;
+      const videoStream = {} as MediaStream;
+      const screenStream = {} as MediaStream;
+      const remoteAudioStream = {} as MediaStream;
+      const remoteVideoStream = {} as MediaStream;
+      const blob = new Blob(["hello"], { type: "text/plain" });
+      const transferInfo = {
+        transferId: "transfer-1",
+        peerId: "user1",
+        direction: "send",
+        name: "hello.txt",
+        size: 5,
+        mimeType: "text/plain",
+        lastModified: 1,
+      };
+
+      jest.spyOn(webrtcManager, "sendFile").mockResolvedValue([transferInfo]);
+      jest.spyOn(webrtcManager, "startVoice").mockResolvedValue(audioStream);
+      jest.spyOn(webrtcManager, "stopVoice").mockImplementation(() => {});
+      jest.spyOn(webrtcManager, "setMuted").mockImplementation(() => {});
+      jest.spyOn(webrtcManager, "getLocalAudioState").mockReturnValue({
+        active: true,
+        muted: false,
+      });
+      jest
+        .spyOn(webrtcManager, "getRemoteAudioStream")
+        .mockReturnValue(remoteAudioStream);
+      jest.spyOn(webrtcManager, "startVideo").mockResolvedValue(videoStream);
+      jest.spyOn(webrtcManager, "stopVideo").mockImplementation(() => {});
+      jest.spyOn(webrtcManager, "setVideoMuted").mockImplementation(() => {});
+      jest.spyOn(webrtcManager, "getLocalVideoState").mockReturnValue({
+        active: true,
+        muted: true,
+      });
+      jest
+        .spyOn(webrtcManager, "getRemoteVideoStream")
+        .mockReturnValue(remoteVideoStream);
+      jest
+        .spyOn(webrtcManager, "startScreenShare")
+        .mockResolvedValue(screenStream);
+      jest.spyOn(webrtcManager, "stopScreenShare").mockImplementation(() => {});
+      jest.spyOn(webrtcManager, "getScreenShareState").mockReturnValue({
+        active: true,
+        source: "screen",
+      });
+
+      await expect(
+        client.sendFile(blob, { peerId: "user1", fileName: "hello.txt" }),
+      ).resolves.toEqual([transferInfo]);
+      await expect(client.startVoice()).resolves.toBe(audioStream);
+      client.stopVoice();
+      client.setMuted(true);
+      expect(client.getLocalAudioState()).toEqual({
+        active: true,
+        muted: false,
+      });
+      expect(client.getRemoteAudioStream("user1")).toBe(remoteAudioStream);
+
+      await expect(client.startVideo({ width: 640 })).resolves.toBe(videoStream);
+      client.stopVideo();
+      client.setVideoMuted(false);
+      expect(client.getLocalVideoState()).toEqual({
+        active: true,
+        muted: true,
+      });
+      expect(client.getRemoteVideoStream("user1")).toBe(remoteVideoStream);
+
+      await expect(client.startScreenShare()).resolves.toBe(screenStream);
+      client.stopScreenShare();
+      expect(client.getScreenShareState()).toEqual({
+        active: true,
+        source: "screen",
+      });
+
+      expect(webrtcManager.sendFile).toHaveBeenCalledWith(blob, {
+        peerId: "user1",
+        fileName: "hello.txt",
+      });
+      expect(webrtcManager.startVideo).toHaveBeenCalledWith({ width: 640 });
+      expect(webrtcManager.setMuted).toHaveBeenCalledWith(true);
+      expect(webrtcManager.setVideoMuted).toHaveBeenCalledWith(false);
+    });
+  });
+
   describe("State queries", () => {
     beforeEach(() => {
       client = new AvesClient({ signalingUrl: testUrl });
@@ -590,6 +690,185 @@ describe("AvesClient Unit Tests", () => {
       expect(errorListener).toHaveBeenCalledWith(error);
     });
 
+    it("should forward WebRTC file, media, and manager errors", () => {
+      const webrtcManager = (client as any).webrtcManager;
+      const startedListener = jest.fn();
+      const progressListener = jest.fn();
+      const completedListener = jest.fn();
+      const failedListener = jest.fn();
+      const audioTrackListener = jest.fn();
+      const audioStateListener = jest.fn();
+      const videoTrackListener = jest.fn();
+      const videoStateListener = jest.fn();
+      const screenStateListener = jest.fn();
+      const errorListener = jest.fn();
+      const info = {
+        transferId: "transfer-1",
+        peerId: "user1",
+        direction: "send",
+        name: "demo.txt",
+        size: 4,
+        mimeType: "text/plain",
+        lastModified: 1,
+      };
+      const progress = { ...info, bytesTransferred: 2, progress: 50 };
+      const result = { ...info, blob: new Blob(["demo"]) };
+      const error = new Error("transport failed");
+      const audioStream = {} as MediaStream;
+      const videoStream = {} as MediaStream;
+      const audioTrack = { kind: "audio" } as MediaStreamTrack;
+      const videoTrack = { kind: "video" } as MediaStreamTrack;
+
+      client.on("fileTransferStarted", startedListener);
+      client.on("fileTransferProgress", progressListener);
+      client.on("fileTransferCompleted", completedListener);
+      client.on("fileTransferFailed", failedListener);
+      client.on("remoteAudioTrack", audioTrackListener);
+      client.on("localAudioStateChange", audioStateListener);
+      client.on("remoteVideoTrack", videoTrackListener);
+      client.on("localVideoStateChange", videoStateListener);
+      client.on("screenShareStateChange", screenStateListener);
+      client.on("error", errorListener);
+
+      (webrtcManager as any).fileTransferStartedCallbacks.forEach((callback: Function) =>
+        callback("user1", info),
+      );
+      (webrtcManager as any).fileTransferProgressCallbacks.forEach((callback: Function) =>
+        callback("user1", progress),
+      );
+      (webrtcManager as any).fileTransferCompletedCallbacks.forEach((callback: Function) =>
+        callback("user1", result),
+      );
+      (webrtcManager as any).fileTransferFailedCallbacks.forEach((callback: Function) =>
+        callback("user1", info, error),
+      );
+      (webrtcManager as any).remoteAudioTrackCallbacks.forEach((callback: Function) =>
+        callback("user1", audioStream, audioTrack),
+      );
+      (webrtcManager as any).localAudioStateCallbacks.forEach((callback: Function) =>
+        callback({ active: true, muted: false }),
+      );
+      (webrtcManager as any).remoteVideoTrackCallbacks.forEach((callback: Function) =>
+        callback("user1", videoStream, videoTrack),
+      );
+      (webrtcManager as any).localVideoStateCallbacks.forEach((callback: Function) =>
+        callback({ active: true, muted: true }),
+      );
+      (webrtcManager as any).screenShareStateCallbacks.forEach((callback: Function) =>
+        callback({ active: true, source: "screen" }),
+      );
+      (webrtcManager as any).errorCallbacks.forEach((callback: Function) =>
+        callback(error),
+      );
+
+      expect(startedListener).toHaveBeenCalledWith("user1", info);
+      expect(progressListener).toHaveBeenCalledWith("user1", progress);
+      expect(completedListener).toHaveBeenCalledWith("user1", result);
+      expect(failedListener).toHaveBeenCalledWith("user1", info, error);
+      expect(audioTrackListener).toHaveBeenCalledWith("user1", audioStream, audioTrack);
+      expect(audioStateListener).toHaveBeenCalledWith({
+        active: true,
+        muted: false,
+      });
+      expect(videoTrackListener).toHaveBeenCalledWith("user1", videoStream, videoTrack);
+      expect(videoStateListener).toHaveBeenCalledWith({
+        active: true,
+        muted: true,
+      });
+      expect(screenStateListener).toHaveBeenCalledWith({
+        active: true,
+        source: "screen",
+      });
+      expect(errorListener).toHaveBeenCalledWith(error);
+    });
+
+    it("should answer signaling offers and report signaling failures", async () => {
+      const signalingClient = (client as any).signalingClient;
+      const webrtcManager = (client as any).webrtcManager;
+      const answer = { type: "answer", sdp: "local-answer" };
+      const errorListener = jest.fn();
+      const sendAnswerSpy = jest
+        .spyOn(signalingClient, "sendAnswer")
+        .mockImplementation(() => {});
+      jest.spyOn(webrtcManager, "createAnswer").mockResolvedValue(answer);
+      (client as any).currentUserId = "user1";
+      client.on("error", errorListener);
+
+      signalingClient.emit("offer", "user2", { type: "offer", sdp: "remote-offer" });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(sendAnswerSpy).toHaveBeenCalledWith("user2", "user1", answer);
+
+      jest
+        .spyOn(webrtcManager, "createAnswer")
+        .mockRejectedValueOnce(new Error("bad offer"));
+      signalingClient.emit("offer", "user3", { type: "offer", sdp: "broken" });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(errorListener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("Failed to handle offer from user3"),
+          peerId: "user3",
+        }),
+      );
+    });
+
+    it("should apply signaling answers and ICE candidates or emit structured errors", async () => {
+      const signalingClient = (client as any).signalingClient;
+      const webrtcManager = (client as any).webrtcManager;
+      const errorListener = jest.fn();
+      const setRemoteAnswerSpy = jest
+        .spyOn(webrtcManager, "setRemoteAnswer")
+        .mockResolvedValue(undefined);
+      const addIceCandidateSpy = jest
+        .spyOn(webrtcManager, "addIceCandidate")
+        .mockResolvedValue(undefined);
+      client.on("error", errorListener);
+
+      signalingClient.emit("answer", "user2", {
+        type: "answer",
+        sdp: "remote-answer",
+      });
+      signalingClient.emit("iceCandidate", "user2", {
+        candidate: "candidate",
+        sdpMid: "0",
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(setRemoteAnswerSpy).toHaveBeenCalledWith("user2", {
+        type: "answer",
+        sdp: "remote-answer",
+      });
+      expect(addIceCandidateSpy).toHaveBeenCalledWith("user2", {
+        candidate: "candidate",
+        sdpMid: "0",
+      });
+
+      setRemoteAnswerSpy.mockRejectedValueOnce(new Error("bad answer"));
+      addIceCandidateSpy.mockRejectedValueOnce(new Error("bad candidate"));
+      signalingClient.emit("answer", "user3", {
+        type: "answer",
+        sdp: "broken",
+      });
+      signalingClient.emit("iceCandidate", "user3", {
+        candidate: "broken",
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(errorListener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("Failed to handle answer from user3"),
+          peerId: "user3",
+        }),
+      );
+      expect(errorListener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("Failed to add ICE candidate from user3"),
+          peerId: "user3",
+        }),
+      );
+    });
+
     it("should forward connection state changes from WebRTC", () => {
       const stateChangeListener = jest.fn();
       client.on("connectionStateChange", stateChangeListener);
@@ -641,6 +920,30 @@ describe("AvesClient Unit Tests", () => {
         "room123",
         "user1",
         "Alice",
+      );
+    });
+
+    it("should clear local room state when session restore fails", async () => {
+      const signalingClient = (client as any).signalingClient;
+      const errorListener = jest.fn();
+      jest.spyOn(signalingClient, "joinRoom").mockRejectedValue(new Error("room gone"));
+
+      (client as any).currentRoomId = "room123";
+      (client as any).currentUserId = "user1";
+      (client as any).currentUserName = "Alice";
+      client.on("error", errorListener);
+
+      signalingClient.emit("stateChange", "disconnected");
+      signalingClient.emit("stateChange", "connected");
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect((client as any).currentRoomId).toBeNull();
+      expect((client as any).currentUserId).toBeNull();
+      expect((client as any).currentUserName).toBeNull();
+      expect(errorListener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("Failed to restore room session"),
+        }),
       );
     });
   });

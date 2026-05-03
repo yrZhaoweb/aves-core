@@ -5,6 +5,7 @@
  * Requirements: 3.3, 3.4, 3.6
  */
 
+import { AvesError } from "../../core/AvesError";
 import { WebRTCManager } from "../../core/WebRTCManager";
 
 // Mock WebRTC APIs
@@ -13,6 +14,7 @@ class MockRTCPeerConnection {
   onconnectionstatechange: (() => void) | null = null;
   onicecandidate: ((event: any) => void) | null = null;
   ondatachannel: ((event: any) => void) | null = null;
+  ontrack: ((event: any) => void) | null = null;
   localDescription: RTCSessionDescription | null = null;
   remoteDescription: RTCSessionDescription | null = null;
 
@@ -40,6 +42,15 @@ class MockRTCPeerConnection {
 
   async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
     // Mock implementation
+  }
+
+  addTransceiver(kind: string): RTCRtpTransceiver {
+    const sender = new MockRTCRtpSender(kind);
+    return { sender } as unknown as RTCRtpTransceiver;
+  }
+
+  addTrack(track: MediaStreamTrack): RTCRtpSender {
+    return new MockRTCRtpSender(track.kind, track);
   }
 
   close(): void {
@@ -77,6 +88,21 @@ class MockRTCDataChannel {
   }
 }
 
+class MockRTCRtpSender {
+  track: MediaStreamTrack | null;
+
+  constructor(
+    public kind: string,
+    track: MediaStreamTrack | null = null,
+  ) {
+    this.track = track;
+  }
+
+  async replaceTrack(track: MediaStreamTrack | null): Promise<void> {
+    this.track = track;
+  }
+}
+
 class MockRTCSessionDescription {
   constructor(public init: RTCSessionDescriptionInit) {}
 }
@@ -89,11 +115,51 @@ class MockRTCIceCandidate {
   }
 }
 
+class MockMediaStreamTrack {
+  enabled = true;
+  readyState: MediaStreamTrackState = "live";
+  onended: (() => void) | null = null;
+
+  constructor(public kind: "audio" | "video") {}
+
+  stop(): void {
+    if (this.readyState === "ended") {
+      return;
+    }
+    this.readyState = "ended";
+  }
+}
+
+class MockMediaStream {
+  private tracks: MediaStreamTrack[];
+
+  constructor(tracks: MediaStreamTrack[] = []) {
+    this.tracks = tracks;
+  }
+
+  getTracks(): MediaStreamTrack[] {
+    return this.tracks;
+  }
+
+  getAudioTracks(): MediaStreamTrack[] {
+    return this.tracks.filter((track) => track.kind === "audio");
+  }
+
+  getVideoTracks(): MediaStreamTrack[] {
+    return this.tracks.filter((track) => track.kind === "video");
+  }
+
+  addTrack(track: MediaStreamTrack): void {
+    this.tracks.push(track);
+  }
+}
+
 // Install mocks globally
 (global as any).RTCPeerConnection = MockRTCPeerConnection;
 (global as any).RTCDataChannel = MockRTCDataChannel;
 (global as any).RTCSessionDescription = MockRTCSessionDescription;
 (global as any).RTCIceCandidate = MockRTCIceCandidate;
+(global as any).MediaStream = MockMediaStream;
 
 describe("WebRTCManager Unit Tests", () => {
   let manager: WebRTCManager;
@@ -167,7 +233,7 @@ describe("WebRTCManager Unit Tests", () => {
 
     it("should create an answer for an offer", async () => {
       const peerId = "peer1";
-      manager.createPeerConnection(peerId);
+      const pc = manager.createPeerConnection(peerId) as any;
 
       const offer: RTCSessionDescriptionInit = {
         type: "offer",
@@ -175,10 +241,15 @@ describe("WebRTCManager Unit Tests", () => {
       };
 
       const answer = await manager.createAnswer(peerId, offer);
+      const remoteChannel = new MockRTCDataChannel("data");
+      pc.ondatachannel({ channel: remoteChannel });
 
       expect(answer).toBeDefined();
       expect(answer.type).toBe("answer");
       expect(answer.sdp).toBe("mock-answer-sdp");
+      expect((manager as any).dataChannels.get(peerId).message).toBe(
+        remoteChannel,
+      );
     });
 
     it("should throw error when creating answer for non-existent peer", async () => {
@@ -265,6 +336,18 @@ describe("WebRTCManager Unit Tests", () => {
       expect(callback).toHaveBeenCalledWith(candidate);
     });
 
+    it("should ignore null ICE candidates", () => {
+      const peerId = "peer1";
+      const pc = manager.createPeerConnection(peerId) as any;
+      const callback = jest.fn();
+
+      manager.onIceCandidate(peerId, callback);
+
+      pc.onicecandidate({ candidate: null });
+
+      expect(callback).not.toHaveBeenCalled();
+    });
+
     it("should throw error when registering ICE callback for non-existent peer", () => {
       const callback = jest.fn();
 
@@ -314,6 +397,18 @@ describe("WebRTCManager Unit Tests", () => {
       expect(() => {
         manager.sendMessageToPeer(peerId, message);
       }).toThrow("DataChannel not ready for peer1, state: connecting");
+
+      try {
+        manager.sendMessageToPeer(peerId, message);
+      } catch (error) {
+        expect(error).toBeInstanceOf(AvesError);
+        expect(error).toMatchObject({
+          code: "MESSAGE_CHANNEL_NOT_READY",
+          stage: "transport",
+          retryable: true,
+          peerId,
+        });
+      }
     });
 
     it("should send message to all peers when all DataChannels are open", () => {
@@ -348,9 +443,10 @@ describe("WebRTCManager Unit Tests", () => {
 
       const message = { type: "broadcast", content: "hello all" };
 
+      // sendMessage no longer throws — it skips peers with unavailable channels
       expect(() => {
         manager.sendMessage(message);
-      }).toThrow("DataChannel not ready for peers: peer2");
+      }).not.toThrow();
     });
 
     it("should receive and deserialize messages", () => {
@@ -378,6 +474,65 @@ describe("WebRTCManager Unit Tests", () => {
       expect(messageCallback).toHaveBeenCalledWith(peerId, message);
     });
 
+    it("should accept all JSON values and reject non-JSON message values", () => {
+      const peerId = "peer1";
+      manager.createPeerConnection(peerId);
+
+      const dataChannel = new MockRTCDataChannel("data");
+      dataChannel.readyState = "open";
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
+      const sendSpy = jest.spyOn(dataChannel, "send");
+
+      const validMessage = {
+        text: "hello",
+        ok: true,
+        count: 3,
+        empty: null,
+        nested: [false, { value: "inside" }],
+      };
+
+      manager.sendMessageToPeer(peerId, validMessage);
+
+      expect(sendSpy).toHaveBeenCalledWith(JSON.stringify(validMessage));
+
+      expect(() => {
+        manager.sendMessageToPeer(peerId, new Date() as any);
+      }).toThrow("Message must be JSON-serializable");
+
+      expect(() => {
+        manager.sendMessageToPeer(peerId, { callback: () => undefined } as any);
+      }).toThrow("Message must be JSON-serializable");
+    });
+
+    it("should emit an error when broadcast send fails for one peer", () => {
+      const openChannel = new MockRTCDataChannel("data");
+      openChannel.readyState = "open";
+      const failingChannel = new MockRTCDataChannel("data");
+      failingChannel.readyState = "open";
+      const errorCallback = jest.fn();
+
+      (manager as any).dataChannels.set("peer1", { message: openChannel });
+      (manager as any).dataChannels.set("peer2", { message: failingChannel });
+      jest.spyOn(openChannel, "send");
+      jest.spyOn(failingChannel, "send").mockImplementation(() => {
+        throw new Error("buffer full");
+      });
+      manager.onError(errorCallback);
+
+      manager.sendMessage({ type: "broadcast" });
+
+      expect(openChannel.send).toHaveBeenCalledWith(
+        JSON.stringify({ type: "broadcast" }),
+      );
+      expect(errorCallback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("Failed to send message to peer2"),
+          code: "MESSAGE_SEND_FAILED",
+          peerId: "peer2",
+        }),
+      );
+    });
+
     it("should handle message parsing errors gracefully", () => {
       const peerId = "peer1";
       manager.createPeerConnection(peerId);
@@ -385,15 +540,14 @@ describe("WebRTCManager Unit Tests", () => {
       const messageCallback = jest.fn();
       manager.onMessage(messageCallback);
 
+      // Subscribe to error callbacks
+      const errorCallback = jest.fn();
+      manager.onError(errorCallback);
+
       // Manually set up DataChannel
       const dataChannel = new MockRTCDataChannel("data");
       (manager as any).dataChannels.set(peerId, { message: dataChannel });
       (manager as any).setupDataChannel(peerId, dataChannel);
-
-      // Mock console.error to verify it's called
-      const consoleErrorSpy = jest
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
 
       // Simulate receiving invalid JSON
       const event = {
@@ -402,10 +556,12 @@ describe("WebRTCManager Unit Tests", () => {
 
       dataChannel.onmessage!(event);
 
-      expect(consoleErrorSpy).toHaveBeenCalled();
+      expect(errorCallback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("Failed to parse message"),
+        }),
+      );
       expect(messageCallback).not.toHaveBeenCalled();
-
-      consoleErrorSpy.mockRestore();
     });
   });
 
@@ -464,6 +620,266 @@ describe("WebRTCManager Unit Tests", () => {
       (manager as any).dataChannels.set(peerId, { message: dataChannel });
 
       expect(manager.isDataChannelReady(peerId)).toBe(true);
+    });
+  });
+
+  describe("Media management", () => {
+    const originalNavigator = (global as any).navigator;
+
+    function installMediaDevices(mediaDevices: Record<string, jest.Mock>): void {
+      Object.defineProperty(global, "navigator", {
+        value: { mediaDevices },
+        configurable: true,
+      });
+    }
+
+    afterEach(() => {
+      Object.defineProperty(global, "navigator", {
+        value: originalNavigator,
+        configurable: true,
+      });
+    });
+
+    it("should start, mute, and stop local audio", async () => {
+      const audioTrack = new MockMediaStreamTrack("audio") as unknown as MediaStreamTrack;
+      const audioStream = new MockMediaStream([audioTrack]) as unknown as MediaStream;
+      const getUserMedia = jest.fn().mockResolvedValue(audioStream);
+      installMediaDevices({ getUserMedia });
+
+      const stateCallback = jest.fn();
+      manager.onLocalAudioStateChange(stateCallback);
+
+      await expect(manager.startVoice()).resolves.toBe(audioStream);
+      expect(getUserMedia).toHaveBeenCalledWith({ audio: true });
+      expect(manager.getLocalAudioState()).toEqual({
+        active: true,
+        muted: false,
+      });
+      expect(stateCallback).toHaveBeenLastCalledWith({
+        active: true,
+        muted: false,
+      });
+
+      manager.setMuted(true);
+      expect(audioTrack.enabled).toBe(false);
+      expect(manager.getLocalAudioState()).toEqual({
+        active: true,
+        muted: true,
+      });
+
+      await expect(manager.startVoice()).resolves.toBe(audioStream);
+
+      manager.stopVoice();
+      expect(audioTrack.readyState).toBe("ended");
+      expect(manager.getLocalAudioState()).toEqual({
+        active: false,
+        muted: true,
+      });
+    });
+
+    it("should reject local audio when capture is unavailable or empty", async () => {
+      Object.defineProperty(global, "navigator", {
+        value: {},
+        configurable: true,
+      });
+      await expect(manager.startVoice()).rejects.toMatchObject({
+        code: "MEDIA_NOT_AVAILABLE",
+      });
+
+      installMediaDevices({
+        getUserMedia: jest
+          .fn()
+          .mockResolvedValue(new MockMediaStream([]) as unknown as MediaStream),
+      });
+      await expect(manager.startVoice()).rejects.toMatchObject({
+        code: "MEDIA_CAPTURE_FAILED",
+      });
+    });
+
+    it("should start, mute, and stop local camera video", async () => {
+      manager.closeAll();
+      manager = new WebRTCManager(testIceServers, undefined, { width: 640 });
+
+      const videoTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+      const videoStream = new MockMediaStream([videoTrack]) as unknown as MediaStream;
+      const getUserMedia = jest.fn().mockResolvedValue(videoStream);
+      installMediaDevices({ getUserMedia });
+
+      const stateCallback = jest.fn();
+      manager.onLocalVideoStateChange(stateCallback);
+
+      await expect(manager.startVideo({ height: 480 })).resolves.toBe(videoStream);
+      expect(getUserMedia).toHaveBeenCalledWith({
+        video: { width: 640, height: 480 },
+      });
+      expect(manager.getLocalVideoState()).toEqual({
+        active: true,
+        muted: false,
+      });
+      expect(stateCallback).toHaveBeenLastCalledWith({
+        active: true,
+        muted: false,
+      });
+
+      manager.setVideoMuted(true);
+      expect(videoTrack.enabled).toBe(false);
+      expect(manager.getLocalVideoState()).toEqual({
+        active: true,
+        muted: true,
+      });
+
+      await expect(manager.startVideo()).resolves.toBe(videoStream);
+
+      manager.stopVideo();
+      expect(videoTrack.readyState).toBe("ended");
+      expect(manager.getLocalVideoState()).toEqual({
+        active: false,
+        muted: true,
+      });
+    });
+
+    it("should reject local video when capture is unavailable or empty", async () => {
+      Object.defineProperty(global, "navigator", {
+        value: {},
+        configurable: true,
+      });
+      await expect(manager.startVideo()).rejects.toMatchObject({
+        code: "MEDIA_NOT_AVAILABLE",
+      });
+
+      installMediaDevices({
+        getUserMedia: jest
+          .fn()
+          .mockResolvedValue(new MockMediaStream([]) as unknown as MediaStream),
+      });
+      await expect(manager.startVideo()).rejects.toMatchObject({
+        code: "MEDIA_CAPTURE_FAILED",
+      });
+    });
+
+    it("should switch to screen share and restore the previous camera track", async () => {
+      const cameraTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+      const screenTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+      const cameraStream = new MockMediaStream([cameraTrack]) as unknown as MediaStream;
+      const screenStream = new MockMediaStream([screenTrack]) as unknown as MediaStream;
+      const getUserMedia = jest.fn().mockResolvedValue(cameraStream);
+      const getDisplayMedia = jest.fn().mockResolvedValue(screenStream);
+      installMediaDevices({ getUserMedia, getDisplayMedia });
+
+      manager.createPeerConnection("peer1");
+      await manager.startVideo();
+
+      const screenStateCallback = jest.fn();
+      manager.onScreenShareStateChange(screenStateCallback);
+
+      await expect(manager.startScreenShare()).resolves.toBe(screenStream);
+      expect(getDisplayMedia).toHaveBeenCalledWith({ video: true });
+      expect(manager.getScreenShareState()).toEqual({
+        active: true,
+        source: "screen",
+      });
+      expect(screenStateCallback).toHaveBeenLastCalledWith({
+        active: true,
+        source: "screen",
+      });
+
+      const sender = (manager as any).videoSenders.get("peer1") as MockRTCRtpSender;
+      expect(sender.track).toBe(screenTrack);
+
+      await expect(manager.startScreenShare()).resolves.toBe(screenStream);
+
+      manager.stopScreenShare();
+      expect(screenTrack.readyState).toBe("ended");
+      expect(sender.track).toBe(cameraTrack);
+      expect(manager.getScreenShareState()).toEqual({
+        active: false,
+        source: "camera",
+      });
+    });
+
+    it("should reject screen sharing when capture is unavailable or empty", async () => {
+      Object.defineProperty(global, "navigator", {
+        value: {},
+        configurable: true,
+      });
+      await expect(manager.startScreenShare()).rejects.toMatchObject({
+        code: "MEDIA_NOT_AVAILABLE",
+      });
+
+      installMediaDevices({
+        getDisplayMedia: jest
+          .fn()
+          .mockResolvedValue(new MockMediaStream([]) as unknown as MediaStream),
+      });
+      await expect(manager.startScreenShare()).rejects.toMatchObject({
+        code: "MEDIA_CAPTURE_FAILED",
+      });
+    });
+
+    it("should stop screen sharing without a camera track and tolerate inactive stops", async () => {
+      const screenTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+      const screenStream = new MockMediaStream([screenTrack]) as unknown as MediaStream;
+      const getDisplayMedia = jest.fn().mockResolvedValue(screenStream);
+      installMediaDevices({ getDisplayMedia });
+
+      manager.createPeerConnection("peer1");
+      await manager.startScreenShare();
+      const sender = (manager as any).videoSenders.get("peer1") as MockRTCRtpSender;
+
+      manager.stopScreenShare();
+      manager.stopScreenShare();
+
+      expect(sender.track).toBeNull();
+      expect(manager.getScreenShareState()).toEqual({
+        active: false,
+        source: "camera",
+      });
+    });
+
+    it("should stop screen sharing when the display track ends", async () => {
+      const screenTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+      const screenStream = new MockMediaStream([screenTrack]) as unknown as MediaStream;
+      const getDisplayMedia = jest.fn().mockResolvedValue(screenStream);
+      installMediaDevices({ getDisplayMedia });
+
+      await manager.startScreenShare();
+      screenTrack.onended!();
+
+      expect(manager.getScreenShareState()).toEqual({
+        active: false,
+        source: "camera",
+      });
+    });
+
+    it("should expose remote audio and video tracks", () => {
+      const audioTrack = new MockMediaStreamTrack("audio") as unknown as MediaStreamTrack;
+      const firstVideoTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+      const secondVideoTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+      const audioCallback = jest.fn();
+      const videoCallback = jest.fn();
+
+      manager.onRemoteAudioTrack(audioCallback);
+      manager.onRemoteVideoTrack(videoCallback);
+
+      const pc = manager.createPeerConnection("peer1") as unknown as MockRTCPeerConnection;
+      pc.ontrack!({ track: audioTrack, streams: [] });
+      pc.ontrack!({ track: firstVideoTrack, streams: [] });
+      pc.ontrack!({ track: secondVideoTrack, streams: [] });
+
+      expect(audioCallback).toHaveBeenCalledWith(
+        "peer1",
+        expect.any(MockMediaStream),
+        audioTrack,
+      );
+      expect(videoCallback).toHaveBeenCalledTimes(2);
+      expect(manager.getRemoteAudioStream("peer1")).toEqual(
+        expect.any(MockMediaStream),
+      );
+      expect(manager.getRemoteVideoStream("peer1")).toEqual(
+        expect.any(MockMediaStream),
+      );
+      expect(manager.getRemoteAudioStream("missing")).toBeNull();
+      expect(manager.getRemoteVideoStream("missing")).toBeNull();
     });
   });
 
@@ -590,13 +1006,31 @@ describe("WebRTCManager Unit Tests", () => {
       }).toThrow();
     });
 
-    it("should log error when DataChannel encounters an error", () => {
+    it("should reject non-finite numeric message values before sending", () => {
       const peerId = "peer1";
       manager.createPeerConnection(peerId);
 
-      const consoleErrorSpy = jest
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const dataChannel = new MockRTCDataChannel("data");
+      dataChannel.readyState = "open";
+      (manager as any).dataChannels.set(peerId, { message: dataChannel });
+      const sendSpy = jest.spyOn(dataChannel, "send");
+
+      expect(() => {
+        manager.sendMessageToPeer(peerId, { value: Number.NEGATIVE_INFINITY });
+      }).toThrow("Message must be JSON-serializable");
+
+      expect(() => {
+        manager.sendMessage({ value: Number.NaN });
+      }).toThrow("Message must be JSON-serializable");
+      expect(sendSpy).not.toHaveBeenCalled();
+    });
+
+    it("should report error when DataChannel encounters an error", () => {
+      const peerId = "peer1";
+      manager.createPeerConnection(peerId);
+
+      const errorCallback = jest.fn();
+      manager.onError(errorCallback);
 
       const dataChannel = new MockRTCDataChannel("data");
       (manager as any).dataChannels.set(peerId, { message: dataChannel });
@@ -606,12 +1040,11 @@ describe("WebRTCManager Unit Tests", () => {
       const error = new Error("DataChannel error");
       dataChannel.onerror!(error);
 
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        `DataChannel error with ${peerId}:`,
-        error
+      expect(errorCallback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining("DataChannel error with peer1"),
+        }),
       );
-
-      consoleErrorSpy.mockRestore();
     });
 
     it("should remove DataChannel from map when closed", () => {
@@ -632,12 +1065,59 @@ describe("WebRTCManager Unit Tests", () => {
   });
 
   describe("File transfer safeguards", () => {
-    it("should reject non-positive chunk sizes", async () => {
-      const peerId = "peer1";
+    function installOpenFileChannels(peerId: string): {
+      messageChannel: MockRTCDataChannel;
+      fileChannel: MockRTCDataChannel;
+    } {
       manager.createPeerConnection(peerId);
-
       const messageChannel = new MockRTCDataChannel("data");
       messageChannel.readyState = "open";
+      const fileChannel = new MockRTCDataChannel("file");
+      fileChannel.readyState = "open";
+      (manager as any).dataChannels.set(peerId, {
+        message: messageChannel,
+        file: fileChannel,
+      });
+
+      return { messageChannel, fileChannel };
+    }
+
+    function transferFor(peerId: string) {
+      return {
+        transferId: "transfer-1",
+        peerId,
+        direction: "send",
+        name: "demo.txt",
+        size: 4,
+        mimeType: "text/plain",
+        lastModified: 1,
+        blob: new Blob(["demo"]),
+        chunkSize: 4,
+      };
+    }
+
+    it("should reject non-positive chunk sizes", async () => {
+      const peerId = "peer1";
+      installOpenFileChannels(peerId);
+
+      await expect(
+        manager.sendFile(new Blob(["hi"]), { peerId, chunkSize: 0 }),
+      ).rejects.toThrow("chunkSize must be a positive integer");
+    });
+
+    it("should reject file sends when no ready file channel exists", async () => {
+      manager.createPeerConnection("peer1");
+
+      await expect(manager.sendFile(new Blob(["hi"]))).rejects.toMatchObject({
+        code: "FILE_CHANNEL_NOT_READY",
+      });
+    });
+
+    it("should reject peer file sends when channels are unavailable or busy", async () => {
+      const peerId = "peer1";
+      manager.createPeerConnection(peerId);
+      const messageChannel = new MockRTCDataChannel("data");
+      messageChannel.readyState = "connecting";
       const fileChannel = new MockRTCDataChannel("file");
       fileChannel.readyState = "open";
       (manager as any).dataChannels.set(peerId, {
@@ -646,25 +1126,34 @@ describe("WebRTCManager Unit Tests", () => {
       });
 
       await expect(
-        manager.sendFile(new Blob(["hi"]), { peerId, chunkSize: 0 }),
-      ).rejects.toThrow("chunkSize must be a positive integer");
+        manager.sendFile(new Blob(["hi"]), { peerId }),
+      ).rejects.toMatchObject({
+        code: "MESSAGE_CHANNEL_NOT_READY",
+      });
+
+      messageChannel.readyState = "open";
+      fileChannel.readyState = "closing";
+      await expect(
+        manager.sendFile(new Blob(["hi"]), { peerId }),
+      ).rejects.toMatchObject({
+        code: "FILE_CHANNEL_NOT_READY",
+      });
+
+      fileChannel.readyState = "open";
+      (manager as any).outgoingTransfers.set(peerId, transferFor(peerId));
+      await expect(
+        manager.sendFile(new Blob(["hi"]), { peerId }),
+      ).rejects.toMatchObject({
+        code: "FILE_TRANSFER_FAILED",
+      });
     });
 
     it("should wait for receiver acknowledgement before reporting completion", async () => {
       const peerId = "peer1";
-      manager.createPeerConnection(peerId);
+      const { messageChannel } = installOpenFileChannels(peerId);
 
       const completedCallback = jest.fn();
       manager.onFileTransferCompleted(completedCallback);
-
-      const messageChannel = new MockRTCDataChannel("data");
-      messageChannel.readyState = "open";
-      const fileChannel = new MockRTCDataChannel("file");
-      fileChannel.readyState = "open";
-      (manager as any).dataChannels.set(peerId, {
-        message: messageChannel,
-        file: fileChannel,
-      });
 
       jest.spyOn(messageChannel, "send").mockImplementation((data: string) => {
         const parsed = JSON.parse(data);
@@ -704,6 +1193,113 @@ describe("WebRTCManager Unit Tests", () => {
       );
     });
 
+    it("should broadcast files only to peers with ready file channels", async () => {
+      const { messageChannel, fileChannel } = installOpenFileChannels("peer1");
+      manager.createPeerConnection("peer2");
+
+      jest.spyOn(messageChannel, "send").mockImplementation((data: string) => {
+        const parsed = JSON.parse(data);
+        if (parsed.kind === "file-meta") {
+          (manager as any).handleFileControlMessage("peer1", {
+            __aves: "aves:file-control",
+            kind: "file-ready",
+            transferId: parsed.transfer.transferId,
+          });
+        }
+      });
+      jest.spyOn(fileChannel, "send").mockImplementation((data: any) => {
+        if (typeof data === "string" && data.startsWith("__aves_file_end__:")) {
+          (manager as any).handleFileControlMessage("peer1", {
+            __aves: "aves:file-control",
+            kind: "file-complete",
+            transferId: data.slice("__aves_file_end__:".length),
+          });
+        }
+      });
+
+      await expect(manager.sendFile(new Blob(["hi"]))).resolves.toEqual([
+        expect.objectContaining({ peerId: "peer1" }),
+      ]);
+    });
+
+    it("should receive file metadata, chunks, and completion acknowledgements", () => {
+      const peerId = "peer1";
+      const { messageChannel, fileChannel } = installOpenFileChannels(peerId);
+      const startedCallback = jest.fn();
+      const progressCallback = jest.fn();
+      const completedCallback = jest.fn();
+      manager.onFileTransferStarted(startedCallback);
+      manager.onFileTransferProgress(progressCallback);
+      manager.onFileTransferCompleted(completedCallback);
+      jest.spyOn(messageChannel, "send");
+
+      (manager as any).setupDataChannel(peerId, fileChannel);
+      fileChannel.onopen!();
+      fileChannel.onmessage!({ data: new ArrayBuffer(1) } as MessageEvent);
+      (manager as any).handleFileControlMessage(peerId, {
+        __aves: "aves:file-control",
+        kind: "file-meta",
+        transfer: {
+          transferId: "incoming-1",
+          name: "incoming.txt",
+          size: 4,
+          mimeType: "text/plain",
+          lastModified: 1,
+        },
+      });
+
+      fileChannel.onmessage!({ data: new ArrayBuffer(2) } as MessageEvent);
+      fileChannel.onmessage!({ data: "x" } as MessageEvent);
+      fileChannel.onmessage!({ data: new Blob(["y"]) } as MessageEvent);
+      fileChannel.onmessage!({
+        data: "__aves_file_end__:incoming-1",
+      } as MessageEvent);
+
+      expect(startedCallback).toHaveBeenCalledWith(
+        peerId,
+        expect.objectContaining({ transferId: "incoming-1", direction: "receive" }),
+      );
+      expect(progressCallback).toHaveBeenCalledWith(
+        peerId,
+        expect.objectContaining({ bytesTransferred: 4, progress: 100 }),
+      );
+      expect(completedCallback).toHaveBeenCalledWith(
+        peerId,
+        expect.objectContaining({
+          transferId: "incoming-1",
+          blob: expect.any(Blob),
+        }),
+      );
+      expect(messageChannel.send).toHaveBeenCalledWith(
+        expect.stringContaining('"kind":"file-complete"'),
+      );
+    });
+
+    it("should clear transfers when a file-control error arrives", () => {
+      const peerId = "peer1";
+      installOpenFileChannels(peerId);
+      const failedCallback = jest.fn();
+      manager.onFileTransferFailed(failedCallback);
+      (manager as any).outgoingTransfers.set(peerId, transferFor(peerId));
+
+      (manager as any).handleFileControlMessage(peerId, {
+        __aves: "aves:file-control",
+        kind: "file-error",
+        transferId: "transfer-1",
+        message: "receiver rejected",
+      });
+
+      expect(failedCallback).toHaveBeenCalledWith(
+        peerId,
+        expect.objectContaining({ transferId: "transfer-1" }),
+        expect.objectContaining({
+          message: "receiver rejected",
+          code: "FILE_TRANSFER_FAILED",
+        }),
+      );
+      expect((manager as any).outgoingTransfers.has(peerId)).toBe(false);
+    });
+
     it("should emit transfer failure when a peer closes mid-transfer", () => {
       const peerId = "peer1";
       manager.createPeerConnection(peerId);
@@ -711,17 +1307,7 @@ describe("WebRTCManager Unit Tests", () => {
       const failedCallback = jest.fn();
       manager.onFileTransferFailed(failedCallback);
 
-      (manager as any).outgoingTransfers.set(peerId, {
-        transferId: "transfer-1",
-        peerId,
-        direction: "send",
-        name: "demo.txt",
-        size: 4,
-        mimeType: "text/plain",
-        lastModified: 1,
-        blob: new Blob(["demo"]),
-        chunkSize: 4,
-      });
+      (manager as any).outgoingTransfers.set(peerId, transferFor(peerId));
 
       manager.closePeerConnection(peerId);
 

@@ -15,6 +15,24 @@ describe("EventEmitter Unit Tests", () => {
   });
 
   describe("Event registration and triggering", () => {
+    it("should support typed event maps declared as normal interfaces", () => {
+      interface TypedEvents {
+        data: [payload: string, count: number];
+        close: [];
+      }
+
+      const typedEmitter = new EventEmitter<TypedEvents>();
+      const listener = jest.fn((payload: string, count: number) => {
+        expect(payload.toUpperCase()).toBe("HELLO");
+        expect(count.toFixed(0)).toBe("42");
+      });
+
+      typedEmitter.on("data", listener);
+      typedEmitter.emit("data", "hello", 42);
+
+      expect(listener).toHaveBeenCalledWith("hello", 42);
+    });
+
     it("should register and trigger a single listener", () => {
       const listener = jest.fn();
       emitter.on("test", listener);

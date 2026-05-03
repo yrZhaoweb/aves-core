@@ -1,38 +1,59 @@
 /**
- * EventEmitter base class
- * Provides event handling functionality for aves-core components
+ * EventEmitter base class with optional type-safe event maps.
+ *
+ * When no type parameter is supplied the emitter is untyped (backward-compatible).
+ * Supply an event map to get full type safety on `on`, `emit`, and `off`:
+ *
+ * ```ts
+ * interface MyEvents {
+ *   data: [payload: string, count: number];
+ *   close: [];
+ * }
+ * const emitter = new EventEmitter<MyEvents>();
+ * emitter.on("data", (payload, count) => { ... });  // payload: string, count: number
+ * emitter.emit("data", "hello", 42);                 // type-safe args
+ * ```
  */
-export class EventEmitter {
-  private events: Map<string, Set<Function>>;
+type EventArgs<TEvents, TEvent extends keyof TEvents> =
+  TEvents[TEvent] extends unknown[] ? TEvents[TEvent] : never;
+
+export class EventEmitter<
+  TEvents extends object = Record<string, unknown[]>,
+> {
+  // Use an internal untyped store; type safety is enforced at the public API boundary.
+  private events: Map<string, Set<(...args: unknown[]) => void>>;
 
   constructor() {
     this.events = new Map();
   }
 
   /**
-   * Register an event listener
-   * @param event - Event name
-   * @param callback - Callback function to be invoked when event is emitted
-   * @returns this for chaining
+   * Register an event listener.
    */
-  on(event: string, callback: Function): this {
+  on<E extends keyof TEvents & string>(
+    event: E,
+    callback: (...args: EventArgs<TEvents, E>) => void,
+  ): this {
     if (!this.events.has(event)) {
-      this.events.set(event, new Set());
+      this.events.set(
+        event,
+        new Set<(...args: unknown[]) => void>(),
+      );
     }
-    this.events.get(event)!.add(callback);
+    this.events.get(event)!.add(callback as (...args: unknown[]) => void);
     return this;
   }
 
   /**
-   * Remove an event listener
-   * @param event - Event name
-   * @param callback - Callback function to remove
-   * @returns this for chaining
+   * Remove an event listener.
    */
-  off(event: string, callback: Function): this {
+  off<E extends keyof TEvents & string>(
+    event: E,
+    callback: (...args: EventArgs<TEvents, E>) => void,
+  ): this {
     const callbacks = this.events.get(event);
     if (callbacks) {
-      callbacks.delete(callback);
+      callbacks.delete(callback as (...args: unknown[]) => void);
       if (callbacks.size === 0) {
         this.events.delete(event);
       }
@@ -41,28 +62,33 @@ export class EventEmitter {
   }
 
   /**
-   * Register a one-time event listener
-   * @param event - Event name
-   * @param callback - Callback function to be invoked once when event is emitted
-   * @returns this for chaining
+   * Register a one-time event listener.
    */
-  once(event: string, callback: Function): this {
-    const onceWrapper = (...args: any[]) => {
+  once<E extends keyof TEvents & string>(
+    event: E,
+    callback: (...args: EventArgs<TEvents, E>) => void,
+  ): this {
+    const onceWrapper = (...args: unknown[]) => {
       this.off(event, onceWrapper);
-      callback(...args);
+      (callback as (...args: unknown[]) => void)(...args);
     };
-    return this.on(event, onceWrapper);
+    if (!this.events.has(event)) {
+      this.events.set(event, new Set([onceWrapper]));
+    } else {
+      this.events.get(event)!.add(onceWrapper);
+    }
+    return this;
   }
 
   /**
-   * Emit an event with arguments
-   * @param event - Event name
-   * @param args - Arguments to pass to listeners
+   * Emit an event with typed arguments.
    */
-  emit(event: string, ...args: any[]): void {
+  emit<E extends keyof TEvents & string>(
+    event: E,
+    ...args: EventArgs<TEvents, E>
+  ): void {
     const callbacks = this.events.get(event);
     if (callbacks) {
-      // Create array from Set to preserve order and avoid modification during iteration
       const callbackArray = Array.from(callbacks);
       for (const callback of callbackArray) {
         callback(...args);
@@ -71,8 +97,7 @@ export class EventEmitter {
   }
 
   /**
-   * Remove all listeners for a specific event or all events
-   * @param event - Optional event name. If not provided, removes all listeners for all events
+   * Remove all listeners for a specific event or all events.
    */
   removeAllListeners(event?: string): void {
     if (event) {

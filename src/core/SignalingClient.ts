@@ -1,44 +1,44 @@
 import { EventEmitter } from "./EventEmitter";
+import { AvesError } from "./AvesError";
 import {
   JoinRoomResult,
-  LeaveRoomResult,
   Participant,
   ReconnectConfig,
-  SignalingErrorCode,
   SignalingErrorPayload,
-  SignalingErrorStage,
   SignalingMessage,
 } from "../types/types";
 
-class SignalingClientError extends Error {
-  code: SignalingErrorCode;
-  stage: SignalingErrorStage;
-  retryable: boolean;
-  requestId?: string;
-
-  constructor(payload: SignalingErrorPayload) {
-    super(payload.message);
-    this.name = "SignalingClientError";
-    this.code = payload.code;
-    this.stage = payload.stage;
-    this.retryable = payload.retryable;
-    this.requestId = payload.requestId;
-  }
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
+
+type SignalingClientEvents = {
+  stateChange: [state: string];
+  error: [error: AvesError];
+  userJoined: [user: Participant];
+  userLeft: [userId: string];
+  offer: [fromId: string, offer: RTCSessionDescriptionInit];
+  answer: [fromId: string, answer: RTCSessionDescriptionInit];
+  iceCandidate: [fromId: string, candidate: RTCIceCandidateInit];
+};
 
 interface PendingRequest<T> {
   type: "create-room" | "join-room" | "leave-room";
   resolve: (value: T) => void;
   reject: (error: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
 }
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * SignalingClient manages WebSocket connection and signaling message exchange
  * Extends EventEmitter to provide event-driven communication
  */
-export class SignalingClient extends EventEmitter {
+export class SignalingClient extends EventEmitter<SignalingClientEvents> {
   private ws: WebSocket | null = null;
   private reconnectConfig: ReconnectConfig;
+  private requestTimeoutMs: number;
   private reconnectAttempts: number = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private url: string = "";
@@ -49,6 +49,10 @@ export class SignalingClient extends EventEmitter {
   constructor(reconnectConfig: ReconnectConfig) {
     super();
     this.reconnectConfig = reconnectConfig;
+    this.requestTimeoutMs =
+      reconnectConfig.requestTimeoutMs && reconnectConfig.requestTimeoutMs > 0
+        ? reconnectConfig.requestTimeoutMs
+        : DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   /**
@@ -76,8 +80,8 @@ export class SignalingClient extends EventEmitter {
         };
 
         this.ws.onerror = (error) => {
-          this.emit("error", new Error("WebSocket error"));
-          reject(new Error("WebSocket connection failed"));
+          this.emit("error", new AvesError({ message: "WebSocket error", code: "SERVER_ERROR", stage: "transport", retryable: true }));
+          reject(new AvesError({ message: "WebSocket connection failed", code: "SERVER_ERROR", stage: "transport", retryable: true }));
         };
 
         this.ws.onmessage = (event) => {
@@ -86,7 +90,7 @@ export class SignalingClient extends EventEmitter {
 
         this.emit("stateChange", "connecting");
       } catch (error) {
-        reject(error);
+        reject(new AvesError({ message: `WebSocket construction failed: ${errorMessage(error)}`, code: "SERVER_ERROR", stage: "transport", retryable: true }));
       }
     });
   }
@@ -107,7 +111,7 @@ export class SignalingClient extends EventEmitter {
       ws.close();
     }
     this.rejectPendingRequests(
-      new SignalingClientError({
+      new AvesError({
         message: "Signaling connection closed",
         code: "SERVER_ERROR",
         stage: "transport",
@@ -127,7 +131,7 @@ export class SignalingClient extends EventEmitter {
   private handleDisconnect(): void {
     this.ws = null;
     this.rejectPendingRequests(
-      new SignalingClientError({
+      new AvesError({
         message: "Signaling connection closed",
         code: "SERVER_ERROR",
         stage: "transport",
@@ -143,15 +147,26 @@ export class SignalingClient extends EventEmitter {
       this.reconnectAttempts++;
       this.reconnectTimer = setTimeout(() => {
         this.connect(this.url).catch((error) => {
-          // Connection failed, will retry on next attempt
+          this.emit(
+            "error",
+            new AvesError({
+              message: `Reconnection attempt ${this.reconnectAttempts} failed: ${errorMessage(error)}`,
+              code: "SERVER_ERROR",
+              stage: "transport",
+              retryable: true,
+            }),
+          );
         });
       }, this.reconnectConfig.delay);
     } else {
       this.emit(
         "error",
-        new Error(
-          `Max reconnection attempts (${this.reconnectConfig.maxAttempts}) reached`
-        )
+        new AvesError({
+          message: `Max reconnection attempts (${this.reconnectConfig.maxAttempts}) reached`,
+          code: "SERVER_ERROR",
+          stage: "transport",
+          retryable: false,
+        }),
       );
     }
   }
@@ -208,7 +223,7 @@ export class SignalingClient extends EventEmitter {
           break;
       }
     } catch (error) {
-      this.emit("error", new Error("Failed to parse signaling message"));
+      this.emit("error", new AvesError({ message: "Failed to parse signaling message", code: "INVALID_MESSAGE_FORMAT", stage: "protocol", retryable: false }));
     }
   }
 
@@ -218,7 +233,7 @@ export class SignalingClient extends EventEmitter {
    */
   private send(message: SignalingMessage): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error("WebSocket is not connected");
+      throw new AvesError({ message: "WebSocket is not connected", code: "SERVER_ERROR", stage: "transport", retryable: true });
     }
     this.ws.send(JSON.stringify(message));
   }
@@ -230,15 +245,11 @@ export class SignalingClient extends EventEmitter {
   createRoom(): Promise<string> {
     const requestId = this.createRequestId("create-room");
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(requestId, {
-        type: "create-room",
-        resolve,
-        reject,
-      });
+      this.trackPendingRequest(requestId, "create-room", resolve, reject);
       try {
         this.send({ type: "create-room", requestId });
       } catch (error) {
-        this.pendingRequests.delete(requestId);
+        this.deletePendingRequest(requestId);
         reject(error);
       }
     });
@@ -263,15 +274,11 @@ export class SignalingClient extends EventEmitter {
     const userName = maybeUserName ?? userIdOrName;
 
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(requestId, {
-        type: "join-room",
-        resolve,
-        reject,
-      });
+      this.trackPendingRequest(requestId, "join-room", resolve, reject);
       try {
         this.send({ type: "join-room", roomId, userId, userName, requestId });
       } catch (error) {
-        this.pendingRequests.delete(requestId);
+        this.deletePendingRequest(requestId);
         reject(error);
       }
     });
@@ -284,15 +291,11 @@ export class SignalingClient extends EventEmitter {
     const requestId = this.createRequestId("leave-room");
 
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(requestId, {
-        type: "leave-room",
-        resolve: () => resolve(),
-        reject,
-      });
+      this.trackPendingRequest(requestId, "leave-room", () => resolve(), reject);
       try {
         this.send({ type: "leave-room", userId, requestId });
       } catch (error) {
-        this.pendingRequests.delete(requestId);
+        this.deletePendingRequest(requestId);
         reject(error);
       }
     });
@@ -309,7 +312,14 @@ export class SignalingClient extends EventEmitter {
     fromId: string,
     offer: RTCSessionDescriptionInit
   ): void {
-    this.send({ type: "offer", targetId, fromId, offer });
+    try {
+      this.send({ type: "offer", targetId, fromId, offer });
+    } catch (error) {
+      this.emit(
+        "error",
+        new AvesError({ message: `Failed to send offer to ${targetId}: ${errorMessage(error)}`, code: "SERVER_ERROR", stage: "transport", retryable: true, peerId: targetId }),
+      );
+    }
   }
 
   /**
@@ -323,7 +333,14 @@ export class SignalingClient extends EventEmitter {
     fromId: string,
     answer: RTCSessionDescriptionInit
   ): void {
-    this.send({ type: "answer", targetId, fromId, answer });
+    try {
+      this.send({ type: "answer", targetId, fromId, answer });
+    } catch (error) {
+      this.emit(
+        "error",
+        new AvesError({ message: `Failed to send answer to ${targetId}: ${errorMessage(error)}`, code: "SERVER_ERROR", stage: "transport", retryable: true, peerId: targetId }),
+      );
+    }
   }
 
   /**
@@ -337,47 +354,105 @@ export class SignalingClient extends EventEmitter {
     fromId: string,
     candidate: RTCIceCandidateInit
   ): void {
-    this.send({ type: "ice-candidate", targetId, fromId, candidate });
+    try {
+      this.send({ type: "ice-candidate", targetId, fromId, candidate });
+    } catch (error) {
+      this.emit(
+        "error",
+        new AvesError({ message: `Failed to send ICE candidate to ${targetId}: ${errorMessage(error)}`, code: "WEBRTC_ICE_FAILED", stage: "transport", retryable: true, peerId: targetId }),
+      );
+    }
   }
 
   /**
-   * Resolve a pending request
-   * @param requestType - Type of request to resolve
-   * @param value - Value to resolve with
+   * Resolve a pending request by its requestId.
+   * If the server response omitted the requestId, we reject all pending
+   * requests of that type rather than guessing which one to resolve.
    */
   private resolvePendingRequest<T>(
     requestId: string | undefined,
     requestType: PendingRequest<T>["type"],
     value: T,
   ): void {
-    const request = requestId
-      ? (this.pendingRequests.get(requestId) as PendingRequest<T> | undefined)
-      : this.findPendingRequestByType<T>(requestType);
+    if (!requestId) {
+      // Server response missing requestId — can't match to a specific request.
+      // Reject all pending requests of this type so they don't hang forever.
+      this.rejectPendingRequestsByType(
+        requestType,
+        new AvesError({
+          message: `Server responded to ${requestType} without requestId`,
+          code: "SERVER_ERROR",
+          stage: "transport",
+          retryable: true,
+        }),
+      );
+      return;
+    }
+
+    const request = this.pendingRequests.get(requestId) as
+      | PendingRequest<T>
+      | undefined;
 
     if (request) {
+      this.deletePendingRequest(requestId);
       request.resolve(value);
-      if (requestId) {
-        this.pendingRequests.delete(requestId);
-      } else {
-        this.deletePendingRequestByReference(request);
-      }
     }
   }
 
   private handleErrorMessage(message: Extract<SignalingMessage, { type: "error" }>): void {
-    const error = new SignalingClientError(message);
+    const error = new AvesError(message);
 
     if (message.requestId) {
       const request = this.pendingRequests.get(message.requestId);
       if (request) {
+        this.deletePendingRequest(message.requestId);
         request.reject(error);
-        this.pendingRequests.delete(message.requestId);
       }
-    } else {
-      this.rejectPendingRequests(error);
     }
 
     this.emit("error", error);
+  }
+
+  private trackPendingRequest<T>(
+    requestId: string,
+    type: PendingRequest<T>["type"],
+    resolve: (value: T) => void,
+    reject: (error: Error) => void,
+  ): void {
+    const timeoutId = setTimeout(() => {
+      const request = this.pendingRequests.get(requestId);
+      if (!request) {
+        return;
+      }
+
+      this.pendingRequests.delete(requestId);
+      const error = new AvesError({
+        message: `Signaling request ${type} timed out after ${this.requestTimeoutMs}ms`,
+        code: "SIGNALING_REQUEST_TIMEOUT",
+        stage: "transport",
+        retryable: true,
+        requestId,
+      });
+      request.reject(error);
+      this.emit("error", error);
+    }, this.requestTimeoutMs);
+
+    this.pendingRequests.set(requestId, {
+      type,
+      resolve,
+      reject,
+      timeoutId,
+    });
+  }
+
+  private deletePendingRequest(requestId: string): void {
+    const request = this.pendingRequests.get(requestId);
+    if (!request) {
+      return;
+    }
+
+    clearTimeout(request.timeoutId);
+    this.pendingRequests.delete(requestId);
   }
 
   /**
@@ -386,33 +461,30 @@ export class SignalingClient extends EventEmitter {
    */
   private rejectPendingRequests(error: Error): void {
     for (const [key, request] of this.pendingRequests) {
+      clearTimeout(request.timeoutId);
       request.reject(error);
     }
     this.pendingRequests.clear();
   }
 
+  /**
+   * Reject all pending requests of a specific type.
+   */
+  private rejectPendingRequestsByType<T>(
+    requestType: PendingRequest<T>["type"],
+    error: Error,
+  ): void {
+    for (const [requestId, request] of this.pendingRequests) {
+      if (request.type === requestType) {
+        clearTimeout(request.timeoutId);
+        request.reject(error);
+        this.pendingRequests.delete(requestId);
+      }
+    }
+  }
+
   private createRequestId(prefix: string): string {
     this.requestCounter += 1;
     return `${prefix}-${Date.now()}-${this.requestCounter}`;
-  }
-
-  private findPendingRequestByType<T>(
-    requestType: PendingRequest<T>["type"],
-  ): PendingRequest<T> | undefined {
-    for (const request of this.pendingRequests.values()) {
-      if (request.type === requestType) {
-        return request as PendingRequest<T>;
-      }
-    }
-    return undefined;
-  }
-
-  private deletePendingRequestByReference(request: PendingRequest<any>): void {
-    for (const [requestId, candidate] of this.pendingRequests.entries()) {
-      if (candidate === request) {
-        this.pendingRequests.delete(requestId);
-        return;
-      }
-    }
   }
 }

@@ -5,6 +5,16 @@ export interface Participant {
   name: string;
 }
 
+export type JsonPrimitive = string | number | boolean | null;
+
+export type JsonObject = {
+  [key: string]: JsonValue;
+};
+
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+
+export type AvesMessage = JsonValue;
+
 export type SignalingErrorCode =
   | "INVALID_MESSAGE_FORMAT"
   | "INVALID_MESSAGE"
@@ -19,6 +29,7 @@ export type SignalingErrorCode =
   | "SIGNALING_FORBIDDEN"
   | "SIGNALING_TARGET_NOT_FOUND"
   | "SIGNALING_TARGET_ROOM_MISMATCH"
+  | "SIGNALING_REQUEST_TIMEOUT"
   | "SERVER_ERROR"
   | (string & {});
 
@@ -43,18 +54,16 @@ export interface JoinRoomResult {
   userId: string;
 }
 
-export interface LeaveRoomResult {
-  roomId: string;
-  userId: string;
-}
 
 export interface AvesClientConfig {
   signalingUrl: string;
   iceServers?: RTCIceServer[];
   fileChunkSize?: number;
+  video?: AvesVideoConstraints;
   reconnect?: {
     maxAttempts?: number;
     delay?: number;
+    requestTimeoutMs?: number;
   };
   debug?: boolean;
 }
@@ -91,6 +100,26 @@ export interface FileTransferResult extends FileTransferInfo {
 export interface LocalAudioState {
   active: boolean;
   muted: boolean;
+}
+
+export interface LocalVideoState {
+  active: boolean;
+  muted: boolean;
+}
+
+export type ScreenShareSource = "camera" | "screen";
+
+export interface ScreenShareState {
+  active: boolean;
+  source: ScreenShareSource;
+}
+
+export interface AvesVideoConstraints {
+  width?: number;
+  height?: number;
+  frameRate?: number;
+  facingMode?: "user" | "environment";
+  deviceId?: string;
 }
 
 // Signaling message types
@@ -137,4 +166,5 @@ export type SignalingMessage =
 export interface ReconnectConfig {
   maxAttempts: number;
   delay: number;
+  requestTimeoutMs?: number;
 }

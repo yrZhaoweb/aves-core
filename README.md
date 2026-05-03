@@ -1,17 +1,22 @@
 # Aves Core
 
-一个轻量级的 WebRTC 客户端库，用于实时点对点通信。提供文件传输、语音通话和消息通信能力，基于全网状拓扑的 DataChannel 直连。
+一个轻量级的 WebRTC 客户端库，用于实时点对点通信。提供消息、文件传输、语音、视频和屏幕共享能力，基于全网状拓扑的 DataChannel / MediaStream 直连。
+
+当前版本：`0.3.0`
 
 ## 特性
 
 - 基于房间的通信模型，全网状 P2P 拓扑
 - 文本消息广播与单播（DataChannel 直传，不经服务器）
 - 文件传输：分块二进制传输，握手协议，进度追踪
-- 实时语音：getUserMedia + RTP transceiver，静音控制
+- 实时语音 / 视频：getUserMedia + RTP transceiver，静音和视频开关控制
+- 屏幕共享：getDisplayMedia，支持结束后恢复摄像头视频轨道
 - 自动断线重连与会话恢复
 - 内置 WebSocket 信令客户端，request/response 关联
+- 结构化 `AvesError`，错误码、阶段、重试语义和上下文可编程处理
 - 事件驱动架构，完整 TypeScript 类型定义
 - 零运行时依赖
+- CJS / ESM / TypeScript types 发布入口
 
 ## 安装
 
@@ -54,20 +59,21 @@ await client.leaveRoom();
 import type { FileTransferProgress, FileTransferResult } from "@yrzhao/aves-core";
 
 // 发送文件（广播给所有对等端）
-await client.sendFile(fileBlob, { name: "photo.jpg", size: fileBlob.size });
+await client.sendFile(fileBlob, { fileName: "photo.jpg" });
 
 // 发送文件给特定对等端
-await client.sendFile(fileBlob, { name: "doc.pdf" }, "peer-123");
+await client.sendFile(fileBlob, { fileName: "doc.pdf", peerId: "peer-123" });
 
 // 监听传输进度
-client.on("fileTransferProgress", (progress: FileTransferProgress) => {
-  console.log(`${progress.fileName}: ${progress.percent}%`);
+client.on("fileTransferProgress", (peerId: string, progress: FileTransferProgress) => {
+  console.log(`${peerId} ${progress.name}: ${Math.round(progress.progress * 100)}%`);
 });
 
 // 接收文件
-client.on("fileTransferCompleted", (result: FileTransferResult) => {
-  // result.file: Blob, result.fileName: string
-  const url = URL.createObjectURL(result.file);
+client.on("fileTransferCompleted", (peerId: string, result: FileTransferResult) => {
+  // result.blob: Blob, result.name: string
+  if (!result.blob) return;
+  const url = URL.createObjectURL(result.blob);
   // 用于下载或显示
 });
 ```
@@ -97,15 +103,39 @@ if (remoteStream) {
 client.stopVoice();
 ```
 
+## 视频与屏幕共享
+
+```typescript
+// 开启摄像头视频
+await client.startVideo({ width: 1280, height: 720, frameRate: 30 });
+
+// 暂停/恢复本地视频轨道
+client.setVideoMuted(true);
+
+// 获取本地视频状态
+const videoState = client.getLocalVideoState();
+// { active: boolean, muted: boolean }
+
+// 获取远端视频流
+const remoteVideo = client.getRemoteVideoStream("peer-123");
+
+// 开始屏幕共享；如果摄像头已开启，停止共享后会恢复摄像头轨道
+await client.startScreenShare();
+client.stopScreenShare();
+```
+
 ## 配置
 
 ```typescript
 interface AvesClientConfig {
   signalingUrl: string;           // 信令服务器 WebSocket URL（必需）
   iceServers?: RTCIceServer[];    // STUN/TURN 服务器
+  fileChunkSize?: number;         // 默认文件分块大小 bytes（默认：65536）
+  video?: AvesVideoConstraints;   // 默认视频约束
   reconnect?: {
     maxAttempts?: number;         // 最大重连次数（默认：5）
     delay?: number;               // 重连延迟 ms（默认：3000）
+    requestTimeoutMs?: number;    // 房间请求超时 ms（默认：30000）
   };
   debug?: boolean;                // 调试日志（默认：false）
 }
@@ -116,7 +146,8 @@ interface AvesClientConfig {
 ```typescript
 {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-  reconnect: { maxAttempts: 5, delay: 3000 },
+  fileChunkSize: 65536,
+  reconnect: { maxAttempts: 5, delay: 3000, requestTimeoutMs: 30000 },
   debug: false
 }
 ```
@@ -144,12 +175,20 @@ interface AvesClientConfig {
 
 | 方法 | 说明 |
 |------|------|
-| `sendFile(blob, options, peerId?)` | 发送文件（广播或单播） |
+| `sendFile(blob, options?)` | 发送文件（`options.peerId` 存在时单播，否则广播） |
 | `startVoice()` | 开启语音 |
 | `stopVoice()` | 关闭语音 |
 | `setMuted(muted)` | 静音控制 |
 | `getLocalAudioState()` | 获取本地音频状态 |
 | `getRemoteAudioStream(peerId)` | 获取远端音频 MediaStream |
+| `startVideo(constraints?)` | 开启摄像头视频 |
+| `stopVideo()` | 关闭摄像头视频 |
+| `setVideoMuted(muted)` | 本地视频轨道开关 |
+| `getLocalVideoState()` | 获取本地视频状态 |
+| `getRemoteVideoStream(peerId)` | 获取远端视频 MediaStream |
+| `startScreenShare()` | 开始屏幕共享 |
+| `stopScreenShare()` | 停止屏幕共享 |
+| `getScreenShareState()` | 获取屏幕共享状态 |
 
 ### 状态查询
 
@@ -169,12 +208,15 @@ interface AvesClientConfig {
 | `connectionStateChange` | `(peerId, state)` | 对等连接状态变化 |
 | `dataChannelStateChange` | `(peerId, state)` | 数据通道状态变化 |
 | `signalingStateChange` | `(state)` | 信令连接状态变化 |
-| `remoteAudioTrack` | `(peerId, stream)` | 收到远端音频流 |
+| `remoteAudioTrack` | `(peerId, stream, track)` | 收到远端音频流 |
+| `remoteVideoTrack` | `(peerId, stream, track)` | 收到远端视频流 |
 | `localAudioStateChange` | `(state)` | 本地音频状态变化 |
-| `fileTransferStarted` | `(info)` | 文件传输开始 |
-| `fileTransferProgress` | `(progress)` | 文件传输进度 |
-| `fileTransferCompleted` | `(result)` | 文件传输完成 |
-| `fileTransferFailed` | `(error)` | 文件传输失败 |
+| `localVideoStateChange` | `(state)` | 本地视频状态变化 |
+| `screenShareStateChange` | `(state)` | 屏幕共享状态变化 |
+| `fileTransferStarted` | `(peerId, info)` | 文件传输开始 |
+| `fileTransferProgress` | `(peerId, progress)` | 文件传输进度 |
+| `fileTransferCompleted` | `(peerId, result)` | 文件传输完成 |
+| `fileTransferFailed` | `(peerId, info, error)` | 文件传输失败 |
 | `error` | `(error)` | 错误 |
 
 ## 浏览器兼容性
@@ -183,6 +225,13 @@ interface AvesClientConfig {
 - Firefox 44+
 - Safari 11+
 - Opera 43+
+
+## 发布与性能说明
+
+- 发布包仅包含 `dist`、`README.md`、`LICENSE` 和 `package.json`
+- 当前 dry-run tarball 约 30 KiB，解包后约 203 KiB
+- 主要运行时开销来自 WebRTC 浏览器实现、网络状况和房间内 peer 数量
+- 客户端全网状拓扑连接数为 O(n)，每个 peer 会建立独立 RTCPeerConnection
 
 ## 许可证
 
