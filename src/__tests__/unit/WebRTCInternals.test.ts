@@ -159,6 +159,72 @@ describe("WebRTC internal helpers", () => {
     expect(addTrack).toHaveBeenCalledWith(videoTrack, expect.any(MockMediaStream));
   });
 
+  it("syncs an already active camera track when a new peer connection is bound", async () => {
+    const videoTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+    const peerConnections = new Map<string, RTCPeerConnection>();
+    const manager = new MediaTrackManager(peerConnections, () =>
+      Array.from(peerConnections.keys()),
+    );
+
+    installNavigator({
+      getUserMedia: jest
+        .fn()
+        .mockResolvedValue(new MockMediaStream([videoTrack])),
+    });
+    await manager.startVideo();
+
+    const videoSender = { replaceTrack: jest.fn().mockResolvedValue(undefined) };
+    const audioSender = { replaceTrack: jest.fn().mockResolvedValue(undefined) };
+    const pc = {
+      addTransceiver: jest.fn((kind: "audio" | "video") => ({
+        sender: kind === "video" ? videoSender : audioSender,
+      })),
+    } as unknown as RTCPeerConnection;
+
+    peerConnections.set("peer2", pc);
+    manager.bindPeerConnection("peer2", pc);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(videoSender.replaceTrack).toHaveBeenCalledWith(videoTrack);
+  });
+
+  it("syncs the active screen share track to newly bound peer connections", async () => {
+    const cameraTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+    const screenTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+    const peerConnections = new Map<string, RTCPeerConnection>();
+    const manager = new MediaTrackManager(peerConnections, () =>
+      Array.from(peerConnections.keys()),
+    );
+
+    installNavigator({
+      getUserMedia: jest
+        .fn()
+        .mockResolvedValue(new MockMediaStream([cameraTrack])),
+      getDisplayMedia: jest
+        .fn()
+        .mockResolvedValue(new MockMediaStream([screenTrack])),
+    });
+    await manager.startVideo();
+    await manager.startScreenShare();
+
+    const videoSender = { replaceTrack: jest.fn().mockResolvedValue(undefined) };
+    const audioSender = { replaceTrack: jest.fn().mockResolvedValue(undefined) };
+    const pc = {
+      addTransceiver: jest.fn((kind: "audio" | "video") => ({
+        sender: kind === "video" ? videoSender : audioSender,
+      })),
+    } as unknown as RTCPeerConnection;
+
+    peerConnections.set("peer2", pc);
+    manager.bindPeerConnection("peer2", pc);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(videoSender.replaceTrack).toHaveBeenCalledWith(screenTrack);
+    expect(videoSender.replaceTrack).not.toHaveBeenCalledWith(cameraTrack);
+  });
+
   it("skips missing peers during media sync", async () => {
     const manager = new MediaTrackManager(new Map(), () => ["missing-peer"]);
     installNavigator({

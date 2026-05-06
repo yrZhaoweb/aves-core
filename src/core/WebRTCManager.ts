@@ -519,12 +519,20 @@ export class WebRTCManager {
   }
 
   /**
-   * Close all connections and clean up resources.
+   * Close all peer connections while preserving local media capture.
+   * Used during signaling reconnect restore so camera/mic intent survives.
    */
-  closeAll(): void {
+  closeAllPeerConnections(): void {
     this.getActivePeers().forEach((peerId) => {
       this.closePeerConnection(peerId);
     });
+  }
+
+  /**
+   * Close all connections and clean up resources.
+   */
+  closeAll(): void {
+    this.closeAllPeerConnections();
     this.stopVoice();
     this.stopVideo();
     this.stopScreenShare();
@@ -667,6 +675,10 @@ export class WebRTCManager {
     };
 
     dataChannel.onerror = (error) => {
+      if (!this.isCurrentDataChannel(peerId, kind, dataChannel)) {
+        return;
+      }
+
       this.emitError(
         new AvesError({ message: `DataChannel error with ${peerId}: ${errorMessage(error)}`, code: "WEBRTC_DATACHANNEL_FAILED", stage: "transport", retryable: true, peerId }),
       );
@@ -691,6 +703,19 @@ export class WebRTCManager {
 
       this.handleMessageChannelMessage(peerId, event.data);
     };
+  }
+
+  private isCurrentDataChannel(
+    peerId: string,
+    kind: keyof PeerChannels,
+    dataChannel: RTCDataChannel,
+  ): boolean {
+    if (!this.peerConnections.has(peerId)) {
+      return false;
+    }
+
+    const channels = normalizePeerChannels(this.dataChannels.get(peerId));
+    return channels[kind] === dataChannel;
   }
 
   private handleMessageChannelMessage(peerId: string, rawData: string): void {

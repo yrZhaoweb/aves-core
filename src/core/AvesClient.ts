@@ -245,7 +245,7 @@ export class AvesClient extends EventEmitter<AvesClientEvents> {
     }
 
     try {
-      this.webrtcManager.closeAll();
+      this.webrtcManager.closeAllPeerConnections();
       this.participants.clear();
       this.preparedPeers.clear();
 

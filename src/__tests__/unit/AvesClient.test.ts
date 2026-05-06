@@ -65,10 +65,12 @@ class MockRTCPeerConnection {
   remoteDescription: RTCSessionDescriptionInit | null = null;
   connectionState: RTCPeerConnectionState = "new";
   iceConnectionState: RTCIceConnectionState = "new";
+  transceiverSenders: MockRTCRtpSender[] = [];
 
   onicecandidate: ((event: any) => void) | null = null;
   onconnectionstatechange: ((event: any) => void) | null = null;
   ondatachannel: ((event: any) => void) | null = null;
+  ontrack: ((event: any) => void) | null = null;
 
   constructor(config: RTCConfiguration) {}
 
@@ -93,6 +95,18 @@ class MockRTCPeerConnection {
   }
 
   async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {}
+
+  addTransceiver(kind: string): RTCRtpTransceiver {
+    const sender = new MockRTCRtpSender(kind);
+    this.transceiverSenders.push(sender);
+    return { sender } as unknown as RTCRtpTransceiver;
+  }
+
+  addTrack(track: MediaStreamTrack): RTCRtpSender {
+    const sender = new MockRTCRtpSender(track.kind, track);
+    this.transceiverSenders.push(sender);
+    return sender as unknown as RTCRtpSender;
+  }
 
   close(): void {
     this.connectionState = "closed";
@@ -127,8 +141,63 @@ class MockRTCDataChannel {
   }
 }
 
+class MockRTCRtpSender {
+  track: MediaStreamTrack | null;
+
+  constructor(
+    public kind: string,
+    track: MediaStreamTrack | null = null,
+  ) {
+    this.track = track;
+  }
+
+  async replaceTrack(track: MediaStreamTrack | null): Promise<void> {
+    this.track = track;
+  }
+}
+
+class MockMediaStreamTrack {
+  enabled = true;
+  readyState: MediaStreamTrackState = "live";
+  onended: (() => void) | null = null;
+
+  constructor(public kind: "audio" | "video") {}
+
+  stop(): void {
+    this.readyState = "ended";
+  }
+}
+
+class MockMediaStream {
+  constructor(private readonly tracks: MediaStreamTrack[] = []) {}
+
+  getTracks(): MediaStreamTrack[] {
+    return this.tracks;
+  }
+
+  getAudioTracks(): MediaStreamTrack[] {
+    return this.tracks.filter((track) => track.kind === "audio");
+  }
+
+  getVideoTracks(): MediaStreamTrack[] {
+    return this.tracks.filter((track) => track.kind === "video");
+  }
+
+  addTrack(track: MediaStreamTrack): void {
+    this.tracks.push(track);
+  }
+}
+
+function installNavigator(mediaDevices: Record<string, unknown>): void {
+  Object.defineProperty(global, "navigator", {
+    value: { mediaDevices },
+    configurable: true,
+  });
+}
+
 // Replace global RTCPeerConnection with mock
 (global as any).RTCPeerConnection = MockRTCPeerConnection;
+(global as any).MediaStream = MockMediaStream;
 
 describe("AvesClient Unit Tests", () => {
   let client: AvesClient;
@@ -921,6 +990,47 @@ describe("AvesClient Unit Tests", () => {
         "user1",
         "Alice",
       );
+    });
+
+    it("should preserve active local video and resync it after restoring a room session", async () => {
+      const videoTrack = new MockMediaStreamTrack("video") as unknown as MediaStreamTrack;
+      installNavigator({
+        getUserMedia: jest
+          .fn()
+          .mockResolvedValue(new MockMediaStream([videoTrack])),
+      });
+
+      await client.startVideo();
+      expect(client.getLocalVideoState()).toEqual({
+        active: true,
+        muted: false,
+      });
+
+      const signalingClient = (client as any).signalingClient;
+      jest.spyOn(signalingClient, "joinRoom").mockResolvedValue({
+        participants: [{ id: "user2", name: "Bob" }],
+        userId: "user1",
+      });
+      jest.spyOn(signalingClient, "sendOffer").mockImplementation(() => {});
+
+      (client as any).currentRoomId = "room123";
+      (client as any).currentUserId = "user1";
+      (client as any).currentUserName = "Alice";
+
+      signalingClient.emit("stateChange", "disconnected");
+      signalingClient.emit("stateChange", "connected");
+      await new Promise((resolve) => setImmediate(resolve));
+      await Promise.resolve();
+
+      const webrtcManager = (client as any).webrtcManager;
+      const sender = (webrtcManager as any).videoSenders.get(
+        "user2",
+      ) as MockRTCRtpSender;
+      expect(client.getLocalVideoState()).toEqual({
+        active: true,
+        muted: false,
+      });
+      expect(sender.track).toBe(videoTrack);
     });
 
     it("should clear local room state when session restore fails", async () => {

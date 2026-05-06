@@ -93,6 +93,7 @@ export class MediaTrackManager {
     this.audioSenders.set(peerId, this.createTransceiverSender(pc, "audio"));
     this.videoSenders.set(peerId, this.createTransceiverSender(pc, "video"));
     void this.syncLocalAudioTrack(peerId);
+    void this.syncLocalVideoTrack(peerId);
   }
 
   async startVoice(): Promise<MediaStream> {
@@ -487,30 +488,55 @@ export class MediaTrackManager {
       return;
     }
 
+    const outgoingTrack = this.getOutgoingVideoTrack();
     let sender = this.videoSenders.get(peerId) ?? null;
 
     if (sender && typeof sender.replaceTrack === "function") {
-      await sender.replaceTrack(this.localVideoTrack);
+      await sender.replaceTrack(outgoingTrack);
       return;
     }
 
     const addTrackCapable = pc as PeerConnectionWithAddTrack;
 
     if (
-      this.localVideoTrack &&
+      outgoingTrack &&
       typeof addTrackCapable.addTrack === "function"
     ) {
       const stream =
-        this.localVideoStream ??
+        this.getOutgoingVideoStream() ??
         (typeof MediaStream !== "undefined"
-          ? new MediaStream([this.localVideoTrack])
+          ? new MediaStream([outgoingTrack])
           : undefined);
 
       sender = stream
-        ? addTrackCapable.addTrack!(this.localVideoTrack, stream)
-        : addTrackCapable.addTrack!(this.localVideoTrack);
+        ? addTrackCapable.addTrack!(outgoingTrack, stream)
+        : addTrackCapable.addTrack!(outgoingTrack);
       this.videoSenders.set(peerId, sender);
     }
+  }
+
+  private getOutgoingVideoTrack(): MediaStreamTrack | null {
+    if (
+      this.screenShareActive &&
+      this.screenShareTrack &&
+      this.screenShareTrack.readyState === "live"
+    ) {
+      return this.screenShareTrack;
+    }
+
+    return this.localVideoTrack;
+  }
+
+  private getOutgoingVideoStream(): MediaStream | null {
+    if (
+      this.screenShareActive &&
+      this.screenShareStream &&
+      this.screenShareTrack?.readyState === "live"
+    ) {
+      return this.screenShareStream;
+    }
+
+    return this.localVideoStream;
   }
 
   private emitLocalAudioState(): void {

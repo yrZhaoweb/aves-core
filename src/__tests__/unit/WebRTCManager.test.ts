@@ -1047,6 +1047,22 @@ describe("WebRTCManager Unit Tests", () => {
       );
     });
 
+    it("should ignore late DataChannel errors from peers that have already been closed", () => {
+      const peerId = "peer1";
+      manager.createPeerConnection(peerId);
+
+      const errorCallback = jest.fn();
+      manager.onError(errorCallback);
+
+      const dataChannel = new MockRTCDataChannel("data");
+      (manager as any).setupDataChannel(peerId, dataChannel);
+
+      manager.closePeerConnection(peerId);
+      dataChannel.onerror!(new Error("late close error"));
+
+      expect(errorCallback).not.toHaveBeenCalled();
+    });
+
     it("should remove DataChannel from map when closed", () => {
       const peerId = "peer1";
       manager.createPeerConnection(peerId);
