@@ -20,6 +20,8 @@ export type {
   Participant,
   AvesMessage,
   AvesClientConfig,
+  AvesConnectionSnapshot,
+  AvesPeerSnapshot,
   AvesVideoConstraints,
   FileTransferOptions,
   FileTransferInfo,
@@ -38,4 +40,5 @@ export type {
   SignalingErrorPayload,
   JoinRoomResult,
   ReconnectConfig,
+  WaitForPeerOptions,
 } from "./types/types";

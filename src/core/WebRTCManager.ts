@@ -570,6 +570,16 @@ export class WebRTCManager {
   }
 
   /**
+   * Get the primary message DataChannel state for a peer.
+   */
+  getDataChannelState(peerId: string): RTCDataChannelState | "closed" {
+    return (
+      normalizePeerChannels(this.dataChannels.get(peerId)).message
+        ?.readyState ?? "closed"
+    );
+  }
+
+  /**
    * Check if the main DataChannel is ready for a specific peer.
    */
   isDataChannelReady(peerId: string): boolean {

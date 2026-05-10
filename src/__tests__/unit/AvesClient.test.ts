@@ -652,6 +652,63 @@ describe("AvesClient Unit Tests", () => {
       expect(participants).toEqual([]);
       expect(Array.isArray(participants)).toBe(true);
     });
+
+    it("should return a connection snapshot for diagnostics", () => {
+      const signalingClient = (client as any).signalingClient;
+      const webrtcManager = (client as any).webrtcManager;
+      (client as any).currentRoomId = "room123";
+      (client as any).currentUserId = "user-current";
+      signalingClient.emit("userJoined", { id: "user1", name: "Alice" });
+      jest.spyOn(webrtcManager, "getActivePeers").mockReturnValue(["user1"]);
+      jest.spyOn(webrtcManager, "getConnectionState").mockReturnValue("connected");
+      jest.spyOn(webrtcManager, "getDataChannelState").mockReturnValue("open");
+      jest.spyOn(webrtcManager, "isDataChannelReady").mockReturnValue(true);
+      jest.spyOn(webrtcManager, "isFileChannelReady").mockReturnValue(false);
+
+      const snapshot = client.getConnectionSnapshot();
+
+      expect(snapshot).toEqual({
+        roomId: "room123",
+        currentUserId: "user-current",
+        signalingConnected: false,
+        participantCount: 1,
+        participants: [{ id: "user1", name: "Alice" }],
+        peers: [
+          {
+            peerId: "user1",
+            participant: { id: "user1", name: "Alice" },
+            connectionState: "connected",
+            dataChannelState: "open",
+            messageChannelReady: true,
+            fileChannelReady: false,
+          },
+        ],
+      });
+    });
+
+    it("should resolve waitForPeer immediately when the data channel is already open", async () => {
+      const webrtcManager = (client as any).webrtcManager;
+      jest.spyOn(webrtcManager, "isDataChannelReady").mockReturnValue(true);
+
+      await expect(client.waitForPeer("user1", { timeoutMs: 10 })).resolves.toEqual(
+        expect.objectContaining({
+          peerId: "user1",
+          dataChannelState: "open",
+          messageChannelReady: true,
+        }),
+      );
+    });
+
+    it("should reject waitForPeer when the peer is not ready before timeout", async () => {
+      const webrtcManager = (client as any).webrtcManager;
+      jest.spyOn(webrtcManager, "isDataChannelReady").mockReturnValue(false);
+      jest.spyOn(webrtcManager, "getDataChannelState").mockReturnValue("closed");
+
+      await expect(client.waitForPeer("user1", { timeoutMs: 1 })).rejects.toMatchObject({
+        code: "WEBRTC_CONNECTION_FAILED",
+        peerId: "user1",
+      });
+    });
   });
 
   describe("Destroy cleanup", () => {

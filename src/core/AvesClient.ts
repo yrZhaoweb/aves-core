@@ -4,7 +4,9 @@ import { WebRTCManager } from "./WebRTCManager";
 import { SignalingClient } from "./SignalingClient";
 import {
   AvesClientConfig,
+  AvesConnectionSnapshot,
   AvesMessage,
+  AvesPeerSnapshot,
   AvesVideoConstraints,
   FileTransferInfo,
   FileTransferOptions,
@@ -14,6 +16,7 @@ import {
   LocalVideoState,
   Participant,
   ScreenShareState,
+  WaitForPeerOptions,
 } from "../types/types";
 
 function errorMessage(error: unknown): string {
@@ -477,8 +480,145 @@ export class AvesClient extends EventEmitter<AvesClientEvents> {
     return this.webrtcManager.getConnectionState(peerId);
   }
 
+  getConnectionSnapshot(): AvesConnectionSnapshot {
+    const participants = this.getParticipants();
+    const participantById = new Map(
+      participants.map((participant) => [participant.id, participant]),
+    );
+    const peerIds = new Set<string>([
+      ...this.webrtcManager.getActivePeers(),
+      ...participants.map((participant) => participant.id),
+    ]);
+    if (this.currentUserId) {
+      peerIds.delete(this.currentUserId);
+    }
+
+    const peers: AvesPeerSnapshot[] = Array.from(peerIds).map((peerId) =>
+      this.createPeerSnapshot(peerId, participantById.get(peerId)),
+    );
+
+    return {
+      roomId: this.currentRoomId,
+      currentUserId: this.currentUserId,
+      signalingConnected: this.signalingClient.isConnected(),
+      participantCount: participants.length,
+      participants,
+      peers,
+    };
+  }
+
+  waitForPeer(
+    peerId: string,
+    options: WaitForPeerOptions = {},
+  ): Promise<AvesPeerSnapshot> {
+    const timeoutMs = options.timeoutMs ?? 30_000;
+
+    const getSnapshot = (): AvesPeerSnapshot =>
+      this.createPeerSnapshot(peerId, this.participants.get(peerId));
+
+    const isReady = () => {
+      const messageReady = this.webrtcManager.isDataChannelReady(peerId);
+      const fileReady = !options.requireFileChannel ||
+        this.webrtcManager.isFileChannelReady(peerId);
+      return messageReady && fileReady;
+    };
+
+    if (isReady()) {
+      return Promise.resolve(getSnapshot());
+    }
+
+    return new Promise((resolve, reject) => {
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        this.off("dataChannelStateChange", handleDataChannelStateChange);
+        this.off("connectionStateChange", handleConnectionStateChange);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+      };
+
+      const resolveIfReady = () => {
+        if (!isReady()) {
+          return;
+        }
+        cleanup();
+        resolve(getSnapshot());
+      };
+
+      const handleDataChannelStateChange = (changedPeerId: string) => {
+        if (changedPeerId === peerId) {
+          resolveIfReady();
+        }
+      };
+
+      const handleConnectionStateChange = (
+        changedPeerId: string,
+        state: RTCPeerConnectionState,
+      ) => {
+        if (changedPeerId !== peerId) {
+          return;
+        }
+
+        if (state === "failed" || state === "closed") {
+          cleanup();
+          reject(
+            new AvesError({
+              message: `Peer ${peerId} connection ${state}`,
+              code: "WEBRTC_CONNECTION_FAILED",
+              stage: "transport",
+              retryable: state === "failed",
+              peerId,
+            }),
+          );
+          return;
+        }
+
+        resolveIfReady();
+      };
+
+      this.on("dataChannelStateChange", handleDataChannelStateChange);
+      this.on("connectionStateChange", handleConnectionStateChange);
+
+      timeoutId = setTimeout(() => {
+        cleanup();
+        reject(
+          new AvesError({
+            message: `Timed out waiting for peer ${peerId}`,
+            code: "WEBRTC_CONNECTION_FAILED",
+            stage: "transport",
+            retryable: true,
+            peerId,
+          }),
+        );
+      }, timeoutMs);
+
+      resolveIfReady();
+    });
+  }
+
   getParticipants(): Participant[] {
     return Array.from(this.participants.values());
+  }
+
+  private createPeerSnapshot(
+    peerId: string,
+    participant?: Participant,
+  ): AvesPeerSnapshot {
+    const messageChannelReady = this.webrtcManager.isDataChannelReady(peerId);
+    const fileChannelReady = this.webrtcManager.isFileChannelReady(peerId);
+
+    return {
+      peerId,
+      participant,
+      connectionState: this.webrtcManager.getConnectionState(peerId),
+      dataChannelState: messageChannelReady
+        ? "open"
+        : this.webrtcManager.getDataChannelState(peerId),
+      messageChannelReady,
+      fileChannelReady,
+    };
   }
 
   getCurrentUserId(): string | null {

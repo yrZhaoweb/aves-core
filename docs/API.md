@@ -87,6 +87,61 @@ Leaves the current room. Closes all peer connections, clears participant state, 
 
 ## Messaging
 
+## Diagnostics
+
+### `getConnectionSnapshot(): AvesConnectionSnapshot`
+
+Returns a synchronous diagnostic snapshot of the current room and peer state.
+
+```ts
+const snapshot = client.getConnectionSnapshot();
+console.log(snapshot.peers);
+```
+
+```ts
+interface AvesConnectionSnapshot {
+  roomId: string | null;
+  currentUserId: string | null;
+  signalingConnected: boolean;
+  participantCount: number;
+  participants: Participant[];
+  peers: AvesPeerSnapshot[];
+}
+
+interface AvesPeerSnapshot {
+  peerId: string;
+  participant?: Participant;
+  connectionState: RTCPeerConnectionState;
+  dataChannelState: RTCDataChannelState | "closed";
+  messageChannelReady: boolean;
+  fileChannelReady: boolean;
+}
+```
+
+Use this for diagnostics panels, automated smoke tests, and support logs. It does not mutate connection state.
+
+### `waitForPeer(peerId, options?): Promise<AvesPeerSnapshot>`
+
+Resolves when the peer's message data channel is open. When `requireFileChannel` is true, it also waits for the file channel.
+
+```ts
+await client.waitForPeer(peerId, {
+  timeoutMs: 10000,
+  requireFileChannel: false,
+});
+
+client.sendMessageToPeer(peerId, { kind: "ready" });
+```
+
+Options:
+
+| Property | Type | Default | Description |
+|---|---|---|---|
+| `timeoutMs` | `number` | `30000` | Maximum wait before rejecting with `WEBRTC_CONNECTION_FAILED`. |
+| `requireFileChannel` | `boolean` | `false` | Also require the file transfer channel to be open. |
+
+---
+
 ### `sendMessage(message): void`
 
 Broadcasts a JSON-serializable message to **every** connected peer.

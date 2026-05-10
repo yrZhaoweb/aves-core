@@ -68,6 +68,29 @@ export interface AvesClientConfig {
   debug?: boolean;
 }
 
+export interface AvesPeerSnapshot {
+  peerId: string;
+  participant?: Participant;
+  connectionState: RTCPeerConnectionState;
+  dataChannelState: RTCDataChannelState | "closed";
+  messageChannelReady: boolean;
+  fileChannelReady: boolean;
+}
+
+export interface AvesConnectionSnapshot {
+  roomId: string | null;
+  currentUserId: string | null;
+  signalingConnected: boolean;
+  participantCount: number;
+  participants: Participant[];
+  peers: AvesPeerSnapshot[];
+}
+
+export interface WaitForPeerOptions {
+  timeoutMs?: number;
+  requireFileChannel?: boolean;
+}
+
 export interface FileTransferOptions {
   peerId?: string;
   fileName?: string;
