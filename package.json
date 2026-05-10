@@ -1,6 +1,6 @@
 {
   "name": "@yrzhao/aves-core",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "WebRTC client library for real-time communication",
   "main": "dist/index.js",
   "module": "dist/esm/index.js",
@@ -25,7 +25,6 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"
   },
-  "peerDependencies": {},
   "devDependencies": {
     "@types/jest": "^29.5.0",
     "@types/node": "^20.0.0",
@@ -40,6 +39,21 @@
     "communication",
     "peer-to-peer"
   ],
-  "author": "",
-  "license": "MIT"
+  "author": "Yrzhao",
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yrzhao/aves.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yrzhao/aves/issues"
+  },
+  "homepage": "https://github.com/yrzhao/aves#readme"
 }
