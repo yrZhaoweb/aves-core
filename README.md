@@ -1,125 +1,166 @@
 # Aves Core
 
-轻量级 WebRTC 客户端库，零运行时依赖。支持消息、文件传输、语音、视频、屏幕共享，基于全网状 P2P 拓扑直连。
+Browser WebRTC client library for peer-to-peer rooms. `@yrzhao/aves-core` connects to an `aves-node` signaling server, builds a full-mesh WebRTC topology, and provides typed APIs for messages, file transfer, voice, video, screen sharing, reconnect restore, and diagnostics.
 
-版本：`0.3.0`
+Version: `1.1.0`
 
-## 安装
+## Install
 
 ```bash
 npm install @yrzhao/aves-core
 ```
 
-## 快速开始
+## Quick Start
 
-```typescript
+```ts
 import { AvesClient } from "@yrzhao/aves-core";
 
-const client = new AvesClient({ signalingUrl: "ws://localhost:8080" });
+const client = new AvesClient({
+  signalingUrl: "wss://signal.example.com",
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    {
+      urls: "turn:turn.example.com:3478",
+      username: "turn-user",
+      credential: "turn-password",
+    },
+  ],
+});
 
-client.on("message", (peerId, message) => console.log(`${peerId}:`, message));
-client.on("userJoined", (p) => console.log(`${p.name} 加入了`));
+client.on("message", (peerId, message) => {
+  console.log("message from", peerId, message);
+});
+
+client.on("error", (error) => {
+  console.error(error.code, error.stage, error.message);
+});
 
 const roomId = await client.createRoom();
 await client.joinRoom(roomId, "Alice");
 
-client.sendMessage({ text: "大家好！" });
+await client.waitForPeer("peer-user-id");
+client.sendMessage({ text: "hello" });
+```
+
+## What It Does
+
+- Creates and joins signaling rooms through `aves-node`.
+- Builds direct WebRTC peer connections between every participant in a room.
+- Sends JSON messages over a data channel.
+- Sends files over a dedicated file data channel.
+- Captures and forwards microphone, camera, and screen-share tracks.
+- Restores room membership after transient signaling disconnects.
+- Emits typed events for application state and errors.
+- Exposes connection snapshots for diagnostics panels and smoke tests.
+
+## What It Does Not Do
+
+- It does not host a signaling server. Use `@yrzhao/aves-node`.
+- It does not relay media or data traffic. Peers communicate directly.
+- It does not replace TURN. Production networks still need TURN fallback.
+- It does not encrypt beyond WebRTC/WebSocket transport guarantees. Use HTTPS/WSS.
+- It is not an SFU. Full-mesh rooms are best for small groups.
+
+## Core API
+
+### Rooms
+
+```ts
+const roomId = await client.createRoom();
+const existingParticipants = await client.joinRoom(roomId, "Alice");
 await client.leaveRoom();
+client.destroy();
 ```
 
-## 核心 API
+### Messages
 
-### 房间管理
-
-| 方法 | 返回 | 说明 |
-|------|------|------|
-| `createRoom()` | `Promise<string>` | 创建房间 |
-| `joinRoom(roomId, name)` | `Promise<Participant[]>` | 加入房间 |
-| `leaveRoom()` | `Promise<void>` | 离开 |
-| `destroy()` | `void` | 销毁客户端 |
-
-### 消息
-
-```typescript
-client.sendMessage({ text: "hi" });              // 广播
-client.sendMessageToPeer(peerId, { text: "hi" }); // 单播
+```ts
+client.sendMessage({ kind: "chat", text: "hello" });
+client.sendMessageToPeer(peerId, { kind: "private", text: "hi" });
 ```
 
-### 文件传输
+### Peer Readiness And Diagnostics
 
-```typescript
-// 发送（广播）
-await client.sendFile(fileBlob, { fileName: "photo.jpg" });
+```ts
+await client.waitForPeer(peerId, { timeoutMs: 10000 });
 
-// 发送（单播）
-await client.sendFile(fileBlob, { fileName: "doc.pdf", peerId: targetId });
+const snapshot = client.getConnectionSnapshot();
+console.log(snapshot.signalingConnected, snapshot.peers);
+```
 
-// 监听
-client.on("fileTransferProgress", (p, pgr) => {
-  console.log(`${p}: ${Math.round(pgr.progress * 100)}%`);
+### Files
+
+```ts
+await client.sendFile(file, {
+  fileName: file.name,
+  mimeType: file.type || "application/octet-stream",
 });
-client.on("fileTransferCompleted", (_, result) => {
-  const url = URL.createObjectURL(result.blob);
+
+client.on("fileTransferProgress", (_peerId, progress) => {
+  console.log(Math.round(progress.progress * 100));
 });
 ```
 
-### 语音
+### Media
 
-```typescript
+```ts
 await client.startVoice();
 client.setMuted(true);
 client.stopVoice();
-```
 
-### 视频
-
-```typescript
 await client.startVideo({ width: 1280, height: 720, frameRate: 30 });
 client.setVideoMuted(true);
 client.stopVideo();
-```
 
-### 屏幕共享
-
-```typescript
-await client.startScreenShare();  // 自动恢复摄像头
+await client.startScreenShare();
 client.stopScreenShare();
 ```
 
-## 配置
+## Configuration
 
-```typescript
+```ts
 new AvesClient({
-  signalingUrl: "ws://localhost:8080",  // 必需
+  signalingUrl: "wss://signal.example.com",
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-  fileChunkSize: 65536,
-  reconnect: { maxAttempts: 5, delay: 3000, requestTimeoutMs: 30000 },
+  fileChunkSize: 16 * 1024,
+  video: { width: 1280, height: 720, frameRate: 30 },
+  reconnect: {
+    maxAttempts: 5,
+    delay: 3000,
+    requestTimeoutMs: 30000,
+  },
   debug: false,
 });
 ```
 
-## 事件
+## Events
 
-| 事件 | 参数 | 说明 |
-|------|------|------|
-| `message` | `(peerId, message)` | 收到消息 |
-| `userJoined` / `userLeft` | `(user)` / `(userId)` | 用户进出 |
-| `connectionStateChange` | `(peerId, state)` | 连接状态 |
-| `localAudioStateChange` | `(state)` | 本地音频状态 |
-| `localVideoStateChange` | `(state)` | 本地视频状态 |
-| `screenShareStateChange` | `(state)` | 屏幕共享状态 |
-| `fileTransferStarted/Progress/Completed/Failed` | — | 文件传输各阶段 |
-| `remoteAudioTrack` / `remoteVideoTrack` | `(peerId, stream, track)` | 收到远端媒体 |
-| `error` | `(error)` | 错误 |
+| Event | Arguments |
+| --- | --- |
+| `signalingStateChange` | `(state)` |
+| `userJoined` | `(participant)` |
+| `userLeft` | `(userId)` |
+| `connectionStateChange` | `(peerId, state)` |
+| `dataChannelStateChange` | `(peerId, state)` |
+| `message` | `(peerId, message)` |
+| `remoteAudioTrack` / `remoteVideoTrack` | `(peerId, stream, track)` |
+| `localAudioStateChange` / `localVideoStateChange` | `(state)` |
+| `screenShareStateChange` | `(state)` |
+| `fileTransferStarted` / `fileTransferProgress` / `fileTransferCompleted` / `fileTransferFailed` | transfer lifecycle payloads |
+| `error` | `(AvesError)` |
 
-## 浏览器兼容性
+## Production Notes
 
-Chrome/Edge 56+、Firefox 44+、Safari 11+、Opera 43+
+- Use HTTPS for the web app and WSS for signaling.
+- Configure TURN for restrictive NATs, enterprise networks, and mobile carriers.
+- Keep rooms small. Full mesh requires each peer to maintain one connection to every other peer.
+- Prefer small to medium files over data channels. Very large files need application-level resume/retry UX.
+- Test Safari and mobile browsers separately if they are target platforms.
 
-## 发布信息
+See [PRODUCTION.md](docs/PRODUCTION.md) and [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
-- 包大小：~30 KiB gzip
-- 全网状拓扑：O(n) 连接数
-- 零运行时依赖
+## Browser Support
+
+Modern Chromium, Firefox, and Safari versions with WebRTC, DataChannel, `getUserMedia`, and `getDisplayMedia` support. Screen sharing and media permissions vary by browser and platform.
 
 MIT
